@@ -37,11 +37,12 @@ import (
 //7728014104 <- in this matchid i purposely moved cursor to corners of screen 1080p during scoreboard open to examine values.
 var matchid string = "7697260946"
 var replay_path string = fmt.Sprintf("/mnt/c/Program Files (x86)/Steam/steamapps/common/dota 2 beta/game/dota/replays/%s.dem", matchid)
+var reportedSteamID uint64 = 76561197971316129
+
 var current_tick int = 0
 var begin_tick int = 0
 var scoreboardOpen map[uint64]bool //steamid as index
 
-var reportedSteamID uint64 = 76561197971316129
 var reportedTeam int = 2
 var reportedSlot int = -1
 var gameTime time.Duration
