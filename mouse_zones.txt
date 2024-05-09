@@ -1,0 +1,53 @@
+=====Y======
+1 - 100->128
+2 - 156->184
+3 - 214->242
+4 - 271->299
+5 - 328->356
+
+6 - 418->446
+7 - 475->503
+8 - 532->560
+9 - 589->617
+10 - 646->674
+
+=======X=========
+865-893
+
+
+
+892 highest actual value ( lowest on screen whilst scoreboard open)
+highest recorded == 317
+
+
+
+
+280,140
+
+0,0 (TopLeft)
+
+510,0 (TopRight)
+
+510,383 (BottomRight)
+
+0,383 (ButtonLeft)
+
+510x383
+
+Thus the aspect ratio of the stored data is 4:3, even though I am on 1080p 16:9.
+
+
+
+newyval = yval/383 * 1080
+newxval = xval/510 * 1920
+
+THEORY:: 
+  The scoreboard is sometimes larger in game than normal, not sure why.
+  This ruins our concept a lot!!, have to find out more!.
+  Proof. eg in replay : 7724730338 , I report abbadon at 30 mins, the scoreboard is smaller than at 3 mins
+  At 3 mins etc I tip Lich and Necro, but its in wrong location. Yet the report on abaddon is correct location.
+  Suggests there is a larger scoreboard than the one that goes to middle of screen...?
+  It actually only applies to WK arcana bug thing, Make them kneel column extra. So any WK player who reports tips could have
+  faulty positioning.  There is a spectre one too.
+  https://www.reddit.com/r/DotA2/comments/m2indn/whenever_i_play_wraith_king_sometimes_a_golden/
+  
