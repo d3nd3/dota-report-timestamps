@@ -460,7 +460,7 @@ func main() {
     }
     if e.GetClassName() == "CDOTAPlayerController" {
 
-      //m_nPlayerID
+      //The player moving cursor is not us.
       if steamid,ok2 :=e.GetUint64("m_steamID"); ok2 {
         if name,ok3 := e.GetString("m_iszPlayerName");ok3 {
           if steamid != reportedSteamID {
@@ -484,6 +484,7 @@ func main() {
                       ypos = int32(math.Round(float64(ypos)/383 * 1080))
                       //fmt.Printf("Mouse XPOS : %d, Mouse YPOS : %d",xpos,ypos)  
                       if targetSlot := isReportButton(int(xpos),int(ypos)); targetSlot != -1 {
+                        //It hovered over our report button.
                         if targetSlot == reportedSlot {
                           for i := 0; i < 10; i++ {
                             if player_resources[i].steamid == steamid {
