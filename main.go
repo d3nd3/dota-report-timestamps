@@ -1,5 +1,6 @@
 // useful examples @ https://github.com/HighGroundVision/Mango/blob/master/web.go
 // go run . 2> debug.log
+// opendota : parse : replay url : http://replay273.valve.net/570/7697260946_320080104.dem.bz2
 /*
 CDOTA_PlayerResource.
 "m_vecPlayerData.0001.m_iRankTier": (int32) 65,
@@ -185,6 +186,9 @@ func isReportButton(x int, y int) int {
 }
 
 func main() {
+  fmt.Printf("=========\n")
+  fmt.Printf("=========Parse Init=========\n")
+  fmt.Printf("=========\n")
   // Initialize the map
   scoreboardOpen = make(map[uint64]bool)
 
