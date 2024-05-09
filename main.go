@@ -35,9 +35,13 @@ import (
 )
 
 //7728014104 <- in this matchid i purposely moved cursor to corners of screen 1080p during scoreboard open to examine values.
+//--REPLACE THESE BELOW--
 var matchid string = "7697260946"
-var replay_path string = fmt.Sprintf("/mnt/c/Program Files (x86)/Steam/steamapps/common/dota 2 beta/game/dota/replays/%s.dem", matchid)
+var replay_dir string = "/mnt/c/Program Files (x86)/Steam/steamapps/common/dota 2 beta/game/dota/replays/"
 var reportedSteamID uint64 = 76561197971316129
+//--REPLACE_ABOVE--
+
+var replay_path string = fmt.Sprintf("%s%s.dem",replay_dir, matchid)
 
 var current_tick int = 0
 var begin_tick int = 0
