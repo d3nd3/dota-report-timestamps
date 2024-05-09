@@ -36,7 +36,7 @@ import (
 
 //7728014104 <- in this matchid i purposely moved cursor to corners of screen 1080p during scoreboard open to examine values.
 //--REPLACE THESE BELOW--
-var matchid string = "7697260946"
+var matchid string = "7729631950"
 var replay_dir string = "/mnt/c/Program Files (x86)/Steam/steamapps/common/dota 2 beta/game/dota/replays/"
 var reportedSteamID uint64 = 76561197971316129
 //--REPLACE_ABOVE--
@@ -317,12 +317,13 @@ func main() {
   //PlayerId from 1-10 here.
   p.Callbacks.OnCDOTAUserMsg_ChatMessage(func(m *dota.CDOTAUserMsg_ChatMessage) error {
     team := ""
-    if (m.GetSourcePlayerId() > 5 && reportedTeam > 5) || (m.GetSourcePlayerId() < 6 && reportedTeam < 6) {
+    if (m.GetSourcePlayerId() > 5 && reportedSlot > 5) || (m.GetSourcePlayerId() < 6 && reportedSlot < 6) {
       team = "FRIENDLY"
     } else {
       team = "ENEMY"
     }
     team2 := ""
+
     if m.GetSourcePlayerId() > 5 {
       team2 = "dire"
     } else {
@@ -330,7 +331,7 @@ func main() {
     }
   	 
   	minutes,secs := ticksToMinutesAndSeconds(current_tick)
-  	fmt.Printf("_ALLCHAT_ (%02d mins:%02d seconds) [ (%s_%s) %s ] said: %s\n",minutes,secs,team,team2, player_resources[m.GetSourcePlayerId()].name, m.GetMessageText())
+  	fmt.Printf("_ALLCHAT_ (%02d mins:%02d seconds) [ (%s_%s) %s ] said: %s\n",minutes,secs,team,team2, player_resources[m.GetSourcePlayerId()-1].name, m.GetMessageText())
 
   	return nil
   })
