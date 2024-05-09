@@ -314,25 +314,26 @@ func main() {
 
   //CDOTAUserMsg_ChatEvent <- This one is for all Update Messages like Barracks destroyed, Roshan killed etc.
 
-  //PlayerId from 1-10 here.
+  //PlayerId from 0-9 here.
   p.Callbacks.OnCDOTAUserMsg_ChatMessage(func(m *dota.CDOTAUserMsg_ChatMessage) error {
     team := ""
-    if (m.GetSourcePlayerId() > 5 && reportedSlot > 5) || (m.GetSourcePlayerId() < 6 && reportedSlot < 6) {
+    if (m.GetSourcePlayerId() >= 5 && reportedSlot >= 5) || (m.GetSourcePlayerId() <= 4 && reportedSlot <= 4) {
       team = "FRIENDLY"
     } else {
       team = "ENEMY"
     }
     team2 := ""
 
-    if m.GetSourcePlayerId() > 5 {
+    if m.GetSourcePlayerId() >= 5 {
       team2 = "dire"
     } else {
       team2 = "radiant"
     }
   	 
   	minutes,secs := ticksToMinutesAndSeconds(current_tick)
-  	fmt.Printf("_ALLCHAT_ (%02d mins:%02d seconds) [ (%s_%s) %s ] said: %s\n",minutes,secs,team,team2, player_resources[m.GetSourcePlayerId()-1].name, m.GetMessageText())
 
+    fmt.Printf("_ALLCHAT_ (%02d mins:%02d seconds) [ (%s_%s) %s ] said: %s\n",minutes,secs,team,team2, player_resources[m.GetSourcePlayerId()].name, m.GetMessageText())
+    
   	return nil
   })
 
