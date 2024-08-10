@@ -19,3 +19,14 @@ Ensure the replay is downloaded, download it from within Dota 2 Client or opendo
 `go run .`  
 or optionally build it with `go build` then run the binary `./dota-report-timestamps`
 
+# Troubleshooting
+go get -u  
+go mod tidy  
+
+# Caveats
+Only detects 16:9 ratio screens at the moment.  
+Need help getting co-ordinate date for the other ratios.  
+
+# Keywords
+parse detect script detection behaviour reports report dota2 dota replay score false
+

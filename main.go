@@ -36,9 +36,11 @@ import (
 
 //7728014104 <- in this matchid i purposely moved cursor to corners of screen 1080p during scoreboard open to examine values.
 //--REPLACE THESE BELOW--
-var matchid string = "7729631950"
-var replay_dir string = "/mnt/c/Program Files (x86)/Steam/steamapps/common/dota 2 beta/game/dota/replays/"
-var reportedSteamID uint64 = 76561197971316129
+var matchid string = "7888798631"
+//var replay_dir string = "/mnt/c/Program Files (x86)/Steam/steamapps/common/dota 2 beta/game/dota/replays/"
+var replay_dir string = "/home/dinda/.steam/debian-installation/steamapps/common/dota 2 beta/game/dota/replays/"
+var reportedSteamID uint64 = 76561199029932610
+//76561197971316129
 //--REPLACE_ABOVE--
 
 var replay_path string = fmt.Sprintf("%s%s.dem",replay_dir, matchid)
@@ -162,28 +164,76 @@ func printFields(data interface{}) {
   }
 }
 
+/*
+x:547 y:780 ( report player 10 )
+21:9 ultrawide monitor, width scoreboard = 700px (in 1080p space)
+16:9 1080p monitor, width scoreboard = 920px
+31:9 == 595px
 
+--
+220 pixels for 1.3125 scale.
+--
+
+21:9 == 700/920 = 0.760869565217
+31:9 == 595px
+
+32/16 = 2
+
+31/16 = 1.9375
+21/16 = 1.3125 (conversion from 16 -> 21)
+
+--21/16--
+658 --- 679
+
+--31/16--
+1.9375/1.3125 = 1.47619047619
+1.47619047619 * 220 = 324.761904762
+920 - 325 = 595px
+595/920 = 0.646739130435 multiplier
+559.429347826 px --- 577.538043479 px
+
+--32/16--
+2/1.3125 = 1.52380952381
+1.52380952381 * 220 = 335.238095238 
+920 - 335 = 585 px
+585/920 = 0.635869565217 multiplier
+550.027173913 px --- 567.831521739 px
+
+879 - 547 = 332 px difference.
+
+332 / 220 = 1.509
+
+1.509 * 1.3125 = 1.98068181818 scale
+
+16 * 1.98068181818 = 31.690
+thus: 31:9 ??
+
+
+32:9 ultraultra wide monitor, width scoreboard = 460px ??
+27:9 544px ??
+*/
 func isReportButton(x int, y int) int {
-  if x >= 865 && x <= 893 {
-    if y >= 100 && y <= 128 {
+  if ( x >= 865 && x <= 893 ) /*|| ( x >= 658 && x <= 679 )*/  {
+  // if x >= 0 && x <= 900 {
+    if y >= 106 && y <= 134 { //120+70x
       return 0
-    } else if y >= 156 && y <= 184 {
+    } else if y >= 176 && y <= 204 {
       return 1
-    } else if y >= 214 && y <= 242 {
+    } else if y >= 246 && y <= 274 {
       return 2
-    } else if y >= 271 && y <= 299 {
+    } else if y >= 316 && y <= 344 {
       return 3
-    } else if y >= 328 && y <= 356 {
+    } else if y >= 386 && y <= 414 {
       return 4
-    } else if y >= 418 && y <= 446 {
+    } else if y >= 486 && y <= 514 {
       return 5
-    } else if y >= 475 && y <= 503 {
+    } else if y >= 556 && y <= 584 {
       return 6
-    } else if y >= 532 && y <= 560 {
+    } else if y >= 626 && y <= 654 {
       return 7
-    } else if y >= 589 && y <= 617 {
+    } else if y >= 696 && y <= 724 {
       return 8
-    } else if y >= 646 && y <= 674 {
+    } else if y >= 766 && y <= 794 {
       return 9
     }
   }
@@ -283,12 +333,14 @@ func main() {
   6,7
   */
   p.Callbacks.OnCDOTAUserMsg_GamerulesStateChanged(func(m *dota.CDOTAUserMsg_GamerulesStateChanged) error {
+    // minutes,secs := ticksToMinutesAndSeconds(current_tick)
+    // fmt.Printf("Game state is now : %d at (%d,%d) really %d\n",m.GetState(),minutes,secs,current_tick)
     if m.GetState() == 5 {
       // Game Begins. 00:00
+      // fmt.Printf("Setting begin_tick %d\n",current_tick)
       begin_tick = current_tick
     }
-    // minutes,secs := ticksToMinutesAndSeconds(current_tick)
-    // fmt.Printf("Game state is now : %d at (%d,%d)",m.GetState(),minutes,secs)
+    
     return nil
   })
 
@@ -410,14 +462,14 @@ func main() {
     Don't really need it though, I guess we filter by being on same team as the target steamID, yet not matching steamID.
   */
   p.OnEntity(func(e *manta.Entity, op manta.EntityOp) error {
-    //e.Dump()
+    // e.Dump()
     //reportedSteamID
-
+    // fmt.Printf("OnEntity...\n")
     if e.GetClassName() == "CDOTA_PlayerResource" {
       for i := 0; i < 10; i++ {
         isVictim := false
         if steamid,steamidok := e.GetUint64(fmt.Sprintf("m_vecPlayerData.000%d.m_iPlayerSteamID",i)); steamidok {
-          //fmt.Printf("Steam id is %d",steamid)
+          // fmt.Printf("Steam id is %d",steamid)
           player_resources[i].steamid = steamid
 
           if steamid == reportedSteamID {
@@ -427,12 +479,12 @@ func main() {
         }
 
         if entindex,entindexok := e.GetUint32(fmt.Sprintf("m_vecPlayerData.000%d.m_nPlayerSlot",i)); entindexok {
-          //fmt.Printf("Entindex is %d",entindex)
+          // fmt.Printf("Entindex is %d",entindex)
           player_resources[i].entindex = entindex
         }
 
         if team,teamok := e.GetInt32(fmt.Sprintf("m_vecPlayerData.000%d.m_iPlayerTeam",i)); teamok {
-          //fmt.Printf("Team is %d", team)
+          // fmt.Printf("Team is %d", team)
           player_resources[i].team = team
           if isVictim {
             reportedTeam = int(team)
@@ -448,18 +500,17 @@ func main() {
       if v, ok := e.GetInt32("m_pGameRules.m_nTotalPausedTicks"); ok {
         if v > 0 {
           pausedTicks = int(v)
-          //fmt.Printf("m_nTotalPausedTicks %d",v)
+          // fmt.Printf("m_nTotalPausedTicks %d",v)
         }
       }
       
     }
-
     //Don't process before heroes picked. (game truely started)
     if begin_tick == 0 {
       return nil
     }
     if e.GetClassName() == "CDOTAPlayerController" {
-
+ 
       //The player moving cursor is not us.
       if steamid,ok2 :=e.GetUint64("m_steamID"); ok2 {
         if name,ok3 := e.GetString("m_iszPlayerName");ok3 {
@@ -475,7 +526,7 @@ func main() {
                   //activated from off state.
                   if !scoreboardOpen[steamid] {
                     // minutes,secs := ticksToMinutesAndSeconds(current_tick)
-                    //fmt.Printf("Scoreboard open at time : {%d,%d}, player: %d , %s", minutes,secs,steamid,name)
+                    // fmt.Printf("Scoreboard open at time : {%d,%d}, player: %d , %s\n", minutes,secs,steamid,name)
                   }
                   //print mouse coords
                   if xpos,xposok := e.GetInt32("m_iCursor.0000"); xposok {
