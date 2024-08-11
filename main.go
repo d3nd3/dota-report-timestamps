@@ -29,6 +29,8 @@ import (
   "fmt"
   "time"
   "math"
+  "flag"
+
 
   "github.com/dotabuff/manta"
   "github.com/dotabuff/manta/dota"
@@ -39,9 +41,12 @@ import (
 var matchid string = "7888798631"
 //var replay_dir string = "/mnt/c/Program Files (x86)/Steam/steamapps/common/dota 2 beta/game/dota/replays/"
 var replay_dir string = "/home/dinda/.steam/debian-installation/steamapps/common/dota 2 beta/game/dota/replays/"
-var reportedSteamID uint64 = 76561199029932610
-//76561197971316129
+
 //--REPLACE_ABOVE--
+
+//These are now set by cmd line arguments
+var reportedSlot int = -1
+var reportedSteamID uint64 = 0
 
 var replay_path string = fmt.Sprintf("%s%s.dem",replay_dir, matchid)
 
@@ -50,9 +55,11 @@ var begin_tick int = 0
 var scoreboardOpen map[uint64]bool //steamid as index
 
 var reportedTeam int = 2
-var reportedSlot int = -1
 var gameTime time.Duration
 var pausedTicks int = 0
+
+var gatheredResources bool = false
+var earlyExit bool = false
 
 type PlayerResource struct {
     steamid uint64
@@ -241,9 +248,46 @@ func isReportButton(x int, y int) int {
 }
 
 func main() {
+  // Define flags
+  slotFlag := flag.Int("s", -1, "Slot ID as an integer")
+  steamFlag := flag.Uint64("sid", 0, "Steam ID as a uint64")
+
+  slotFlagProvided := false
+  steamFlagProvided := false
+
+  // Parse the flags
+  flag.Parse()
+
+
+  // Check if the flags were provided by the user
+  if flag.Lookup("s").Value.String() != "-1" {
+    reportedSlot = *slotFlag
+    fmt.Printf("Slot ID (int): %d\n", reportedSlot)
+    slotFlagProvided = true
+  } else {
+    fmt.Println("Slot ID (int) not provided")
+  }
+
+  if flag.Lookup("sid").Value.String() != "0" {
+    reportedSteamID = *steamFlag
+    fmt.Printf("Steam ID (uint64): %d\n", reportedSteamID)
+    steamFlagProvided = true
+  } else {
+    fmt.Println("Steam ID (uint64) not provided")
+  }
+
+  // fmt.Printf("You provided %d args %s\n",len(os.Args),os.Args[0])
+  // os.Exit(1)
+  // Must provide one parameter.
+  if len(os.Args) == 1 || (!steamFlagProvided && !slotFlagProvided) {
+    earlyExit = true
+    fmt.Printf("Usage:\ngo run main.go -s <slot_id>\ngo run main.go -sid <steam_id>\n")
+  }
+
   fmt.Printf("=========\n")
   fmt.Printf("=========Parse Init=========\n")
   fmt.Printf("=========\n")
+
   // Initialize the map
   scoreboardOpen = make(map[uint64]bool)
 
@@ -466,25 +510,48 @@ func main() {
     //reportedSteamID
     // fmt.Printf("OnEntity...\n")
     if e.GetClassName() == "CDOTA_PlayerResource" {
+      if (!gatheredResources) {
+        fmt.Printf("\n---\n")
+      }
       for i := 0; i < 10; i++ {
         isVictim := false
+        if reportedSlot != -1 && i == reportedSlot {
+          //This has been provided at cmdline
+          isVictim = true
+        }
+        if (!gatheredResources) {
+          fmt.Printf("\n---PlayerSlot %d---\n",i)
+        }
+        
         if steamid,steamidok := e.GetUint64(fmt.Sprintf("m_vecPlayerData.000%d.m_iPlayerSteamID",i)); steamidok {
-          // fmt.Printf("Steam id is %d",steamid)
+          if (!gatheredResources) {
+            fmt.Printf("Steam id is %d\n",steamid)
+          }
           player_resources[i].steamid = steamid
 
-          if steamid == reportedSteamID {
-            isVictim = true
-            reportedSlot = i
+          //Sets slot based on steamid
+          if reportedSteamID > 0 {
+            if steamid == reportedSteamID {
+              isVictim = true
+              reportedSlot = i
+            }
+          } else if isVictim {
+            //Set steamID based on slot
+            reportedSteamID = steamid
           }
         }
 
         if entindex,entindexok := e.GetUint32(fmt.Sprintf("m_vecPlayerData.000%d.m_nPlayerSlot",i)); entindexok {
-          // fmt.Printf("Entindex is %d",entindex)
+          if (!gatheredResources) {
+            fmt.Printf("Entindex is %d\n",entindex)
+          }
           player_resources[i].entindex = entindex
         }
 
         if team,teamok := e.GetInt32(fmt.Sprintf("m_vecPlayerData.000%d.m_iPlayerTeam",i)); teamok {
-          // fmt.Printf("Team is %d", team)
+          if (!gatheredResources) {
+            fmt.Printf("Team is %d\n", team)
+          }
           player_resources[i].team = team
           if isVictim {
             reportedTeam = int(team)
@@ -492,8 +559,19 @@ func main() {
         }
 
         if name,nameok := e.GetString(fmt.Sprintf("m_vecPlayerData.000%d.m_iszPlayerName",i)); nameok {
+          if (!gatheredResources) {
+            fmt.Printf("Name is %s\n", name)
+          }
           player_resources[i].name = name
         }
+        if (!gatheredResources) {
+          fmt.Printf("\n---\n")
+        }
+      }
+      gatheredResources = true
+      if earlyExit {
+        fmt.Printf("\n======\nPlease provide a victim identifier! (-s for slot) or (-sid for steam_id)\n======\n")
+        os.Exit(1)
       }
     } else if e.GetClassName() == "CDOTAGamerulesProxy" {
       
