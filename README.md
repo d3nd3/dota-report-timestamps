@@ -4,13 +4,9 @@ git clone github.com/d3nd3/dota-report-timestamps
 cd dota-report-timestamps  
 go mod download  
 
-# Edit for your account
+# Setup Replay Directory.
 Edit main.go:  
-var matchid string = "7697260946"  
 var replay_dir string = "path/to/replays/"  
-
-replace 7697260946 with the matchid you got reported in.  
-replace the long replay_dir with your dota replays directory.  
 
 
 # Running the replay parser
@@ -24,13 +20,13 @@ Use that data to specify in commandline who is the victim you are interseted got
 eg for see who reported blue slot 0 :  
 
 ```
-go run . -s 0
+go run . -s 0 -m 5430584395
 ```
 
 eg for see who reported steam id 99999999 :
 
 ```
-go run . -sid 99999999
+go run . -sid 99999999 -m 54356546456
 ```
 
 
@@ -38,9 +34,11 @@ go run . -sid 99999999
 go get -u  
 go mod tidy  
 
-# Caveats
-Only detects 16:9 ratio screens at the moment.  
-Need help getting co-ordinate date for the other ratios.  
+# Implementation Considerations
+Aspect Ratio is obtained in the replay for each player  
+When a player runs out of tips, the report button location shifts 100 pixels to the left  
+When a player who has special hero like WK, he can have extra stuff in his scoreboard which makes his report button be in a different location.
+
 
 # Keywords
 parse detect script detection behaviour reports report dota2 dota replay score false

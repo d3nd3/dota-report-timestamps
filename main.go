@@ -38,7 +38,7 @@ import (
 
 //7728014104 <- in this matchid i purposely moved cursor to corners of screen 1080p during scoreboard open to examine values.
 //--REPLACE THESE BELOW--
-var matchid string = "7888798631"
+var matchid string = "0"
 //var replay_dir string = "/mnt/c/Program Files (x86)/Steam/steamapps/common/dota 2 beta/game/dota/replays/"
 var replay_dir string = "/home/dinda/.steam/debian-installation/steamapps/common/dota 2 beta/game/dota/replays/"
 
@@ -48,7 +48,7 @@ var replay_dir string = "/home/dinda/.steam/debian-installation/steamapps/common
 var reportedSlot int = -1
 var reportedSteamID uint64 = 0
 
-var replay_path string = fmt.Sprintf("%s%s.dem",replay_dir, matchid)
+var replay_path string
 
 var current_tick int = 0
 var begin_tick int = 0
@@ -178,7 +178,8 @@ x:547 y:780 ( report player 10 )
 31:9 == 595px
 
 --
-220 pixels for 1.3125 scale.
+Ah I calculated: 920-700 = 220px for every 131.25% increase in width.
+220 virtual pixels for 1.3125 scale.
 --
 
 21:9 == 700/920 = 0.760869565217
@@ -188,6 +189,17 @@ x:547 y:780 ( report player 10 )
 
 31/16 = 1.9375
 21/16 = 1.3125 (conversion from 16 -> 21)
+
+
+====alg===== (scoreboard takes less % of screen width on larger aspect ratios)
+aspect/1.3125 = how_many_220px
+how_many_220px * 220px = new_width
+
+
+920-round(new_width) = width_other
+
+width_other/920 = screenFraction
+screenFraction
 
 --21/16--
 658 --- 679
@@ -218,9 +230,42 @@ thus: 31:9 ??
 
 32:9 ultraultra wide monitor, width scoreboard = 460px ??
 27:9 544px ??
+
+
+aspect,aspectok := e.GetFloat32("m_flAspectRatio")
+if !aspectok {
+  fmt.Printf("No Aspect")
+}
+
+//920 when have tip available
+//820 when no tips available
+//thus have to query both
+
 */
-func isReportButton(x int, y int) int {
-  if ( x >= 865 && x <= 893 ) /*|| ( x >= 658 && x <= 679 )*/  {
+func isReportButton(x int, y int,aspect float32) int {
+  /*
+    1.77777777778 * 0.479166666667 / (16/10) = 0.532407407408
+
+    0.532407407408 * 1920 = 1022.22222222px
+  */
+  // width of their scoreboard in 1920 pixels, based on thier custom resolution,aspectRatio.
+  score_width := int(math.Round(float64((1.77777777778 * (920.0/1920)) / aspect * 1920)))
+  score_width_no_tips := int(math.Round(float64((1.77777777778 * (820.0/1920)) / aspect * 1920)))
+  // fmt.Printf("Score Width : %d\n",score_width) 
+
+  lower_x_bound := 865.0
+  upper_x_bound := 893.0
+
+  lower_x_bound_r := lower_x_bound/920
+  upper_x_bound_r := upper_x_bound/920
+
+  lower_x_bound_no_tips_r := (lower_x_bound-100)/820
+  upper_x_bound_no_tips_r := (upper_x_bound-100)/820
+
+  // fmt.Printf("WTF??:%f\n",float64(1.77777777778 * (820.0/1920)))
+  // fmt.Printf("huh?? : %d\n",int(math.Floor(float64(lower_x_bound_no_tips_r*float64(score_width_no_tips)))))
+
+  if ( ( x >= int(math.Floor(float64(lower_x_bound_no_tips_r*float64(score_width_no_tips)))) && x <= int(math.Ceil(float64(upper_x_bound_no_tips_r*float64(score_width_no_tips)))) ) || ( x >= int(math.Floor(float64(lower_x_bound_r*float64(score_width)))) && x <= int(math.Ceil(float64(upper_x_bound_r*float64(score_width)))) ) ) /*|| ( x >= 658 && x <= 679 )*/  {
   // if x >= 0 && x <= 900 {
     if y >= 106 && y <= 134 { //120+70x
       return 0
@@ -251,10 +296,11 @@ func main() {
   // Define flags
   slotFlag := flag.Int("s", -1, "Slot ID as an integer")
   steamFlag := flag.Uint64("sid", 0, "Steam ID as a uint64")
+  matchFlag := flag.String("m","","Match ID as a uint64")
 
   slotFlagProvided := false
   steamFlagProvided := false
-
+  matchFlagProvided := false
   // Parse the flags
   flag.Parse()
 
@@ -276,12 +322,22 @@ func main() {
     fmt.Println("Steam ID (uint64) not provided")
   }
 
+  if flag.Lookup("m").Value.String() != "" {
+    matchid = *matchFlag
+    replay_path = fmt.Sprintf("%s%s.dem",replay_dir, matchid)
+    fmt.Printf("Match ID (uint64): %s\n", matchid)
+    matchFlagProvided = true
+  } else {
+    earlyExit = true
+    fmt.Println("Match ID (string) not provided\nYou must give a match_id")
+  }
+
   // fmt.Printf("You provided %d args %s\n",len(os.Args),os.Args[0])
   // os.Exit(1)
-  // Must provide one parameter.
-  if len(os.Args) == 1 || (!steamFlagProvided && !slotFlagProvided) {
+  // Must provide two parameters.
+  if len(os.Args) != 5 || !matchFlagProvided || ( steamFlagProvided && slotFlagProvided ) {
     earlyExit = true
-    fmt.Printf("Usage:\ngo run main.go -s <slot_id>\ngo run main.go -sid <steam_id>\n")
+    fmt.Printf("Usage:\ngo run main.go -s <slot_id> -m <match_id>\ngo run main.go -sid <steam_id> -m <match_id>\n")
   }
 
   fmt.Printf("=========\n")
@@ -603,7 +659,7 @@ func main() {
               if statsPanel == 1 {
                   //activated from off state.
                   if !scoreboardOpen[steamid] {
-                    // minutes,secs := ticksToMinutesAndSeconds(current_tick)
+                    // minutes,secs := ticksToMinutesAndSeconds(current_tick) 
                     // fmt.Printf("Scoreboard open at time : {%d,%d}, player: %d , %s\n", minutes,secs,steamid,name)
                   }
                   //print mouse coords
@@ -611,33 +667,41 @@ func main() {
                     if ypos,yposok := e.GetInt32("m_iCursor.0001"); yposok {
                       xpos = int32(math.Round(float64(xpos)/510 * 1920))
                       ypos = int32(math.Round(float64(ypos)/383 * 1080))
-                      //fmt.Printf("Mouse XPOS : %d, Mouse YPOS : %d",xpos,ypos)  
-                      if targetSlot := isReportButton(int(xpos),int(ypos)); targetSlot != -1 {
-                        //It hovered over our report button.
-                        if targetSlot == reportedSlot {
-                          for i := 0; i < 10; i++ {
-                            if player_resources[i].steamid == steamid {
-                              
-                              //found the reporting player's slot id.
-                              
-                              if !hasReportedYou[i] {
+                      // minutes,secs := ticksToMinutesAndSeconds(current_tick)
+                      // fmt.Printf("Player: %s, Mouse XPOS : %d, Mouse YPOS : %d at time : {%d,%d}\n",name,xpos,ypos,minutes,secs)
+
+                      if aspect,aspectok := e.GetFloat32("m_flAspectRatio"); aspectok {
+                        if targetSlot := isReportButton(int(xpos),int(ypos),aspect); targetSlot != -1 {
+                          //It hovered over our report button.
+                          if targetSlot == reportedSlot {
+                            for i := 0; i < 10; i++ {
+                              if player_resources[i].steamid == steamid {
+                                
+                                //found the reporting player's slot id.
+                                
+                                
                                 minutes,secs := ticksToMinutesAndSeconds(current_tick)
                                 if team,okteam := e.GetUint64("m_iTeamNum");okteam {
                                   if reportedTeam == int(team) {
                                     fmt.Printf("_REPORT_ (%02d mins:%02d seconds) from _TEAMMATE_: steamid=%d , slot=%d, name=%s\n",minutes,secs,steamid,i,name)
-                                    teamReports += 1
+                                    if !hasReportedYou[i] {
+                                      teamReports += 1
+                                    }
                                   } else {
                                     fmt.Printf("_REPORT_ (%02d mins:%02d seconds) from _ENEMY_: steamid=%d , slot=%d, name=%s\n",minutes,secs,steamid,i,name)
-                                    enemyReports += 1
+                                    if !hasReportedYou[i] {
+                                      enemyReports += 1
+                                    }
                                   }
                                 }
-                              }
-                              hasReportedYou[i] = true
+                                
+                                hasReportedYou[i] = true
 
-                              //fmt.Printf("Who: %d Mouse XPOS : %d, Mouse YPOS : %d",i,xpos,ypos)
-                              break
-                            }
-                          } 
+                                //fmt.Printf("Who: %d Mouse XPOS : %d, Mouse YPOS : %d",i,xpos,ypos)
+                                break
+                              }
+                            } 
+                          }
                         }
                       }
                     }

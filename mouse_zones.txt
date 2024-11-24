@@ -30,7 +30,7 @@ highest recorded == 317
 
 510,383 (BottomRight)
 
-0,383 (ButtonLeft)
+0,383 (BottomLeft)
 
 510x383
 
@@ -51,3 +51,72 @@ THEORY::
   faulty positioning.  There is a spectre one too.
   https://www.reddit.com/r/DotA2/comments/m2indn/whenever_i_play_wraith_king_sometimes_a_golden/
   
+
+
+  ========LATEST ALGORITHM==========
+  1.3125 == 220
+
+
+920
+
+
+
+
+1456 4:3 ... 1456/1920 = 0.758333333333 ....... 1.33333333333
+
+
+1091 :16:9 ... 1091/1920 = 0.568229166667 ...... 1.77777777778
+
+1210 :16:10 ... 1210/1920 = 0.630208333333 ...... 1.6
+
+
+830 :21:9 ... 830/1920 = 0.432291666667 ....... 2.33333333333
+
+
+
+
+
+1920px
+
+
+
+How much the width is wider than the height.
+
+
+
+1.75000004125
+
+
+
+0.758333333333 / 0.432291666667 = 1.75421686747
+
+2.333333333 / 1.3333333333 = 1.75
+
+
+%_screen_to / %_screen_from = from_to_converter
+aspect_screen_from / aspect_screen_to = from_to_converter
+
+%_screen_to / %_screen_from = aspect_screen_from / aspect_screen_to
+
+
+===========================
+we convert from 16:9 ... 920/1920 .... to some new %. THUS:
+%_screen_to = aspect_screen_from * %_screen_from / aspect_screen_to
+
+
+eg. (16:10 -> 16:9)
+
+1.77777777778 * 0.479166666667 / (16/10) = 0.532407407408
+
+0.532407407408 * 1920 = 1022.22222222px
+
+eg2. (31:9 -> 16:9)
+
+1.77777777778 * 0.479166666667 = 0.851851851854
+0.851851851854 / (31/9) = 0.247311827957
+0.247311827957 * 1920 = 474.838709678px
+
+eg3. (21:9 -> 16:9)
+0.851851851854 / (21/9) = 0.36507936508
+0.36507936508 * 1920 = 700.952380954px
+
