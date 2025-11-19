@@ -21,6 +21,13 @@ The tool provides a modern web interface for easy usage and batch processing.
 
 ### Building and Running
 
+**Quick Start** (Recommended):
+```bash
+./run.sh
+```
+This script will build and run the server automatically.
+
+**Manual Build and Run**:
 1.  **Build the Server**:
     ```bash
     go build -o server ./cmd/server
@@ -30,10 +37,11 @@ The tool provides a modern web interface for easy usage and batch processing.
     ```bash
     ./server
     ```
-    The server will start on `http://localhost:8081` by default.
 
-3.  **Open in Browser**:
-    Navigate to `http://localhost:8081` in your web browser.
+The server will start on `http://localhost:8081` by default.
+
+**Open in Browser**:
+Navigate to `http://localhost:8081` in your web browser.
 
 ### Configuration
 
