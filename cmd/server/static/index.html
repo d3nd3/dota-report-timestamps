@@ -20,6 +20,33 @@
 
         <main class="main-content">
             <aside class="sidebar">
+                <section id="profile-section" class="card">
+                    <div class="card-header">
+                        <h2>Steam Profiles</h2>
+                    </div>
+                    <div class="card-body">
+                         <div class="input-group">
+                            <label for="profile-select">Saved Profiles</label>
+                            <div class="row-group">
+                                <select id="profile-select" class="full-width">
+                                    <option value="">Select a profile...</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label>Add New Profile</label>
+                            <div class="row-group">
+                                <input type="text" id="new-profile-name" placeholder="Name (e.g. Main)">
+                                <input type="number" id="new-profile-id" placeholder="Steam ID">
+                                <button id="add-profile-btn" class="btn success-btn">Add</button>
+                            </div>
+                        </div>
+                         <div class="row-group" style="justify-content: flex-end;">
+                            <button id="delete-profile-btn" class="btn danger-btn small-btn" style="visibility: hidden;">Delete Selected</button>
+                        </div>
+                    </div>
+                </section>
+
                 <section id="config-section" class="card">
                     <div class="card-header">
                         <h2>Configuration</h2>
@@ -33,7 +60,33 @@
                             <label for="stratz-api-token">Stratz API Token</label>
                             <input type="password" id="stratz-api-token" placeholder="Your Stratz API token" autocomplete="off">
                         </div>
+                        <div class="input-group">
+                            <label for="steam-api-key">Steam API Key</label>
+                            <input type="password" id="steam-api-key" placeholder="Your Steam API Key (Optional)" autocomplete="off">
+                        </div>
                         <button id="save-config" class="btn secondary-btn">Save Settings</button>
+                    </div>
+                </section>
+
+                <section id="steam-login-section" class="card">
+                    <div class="card-header">
+                        <h2>Steam GC Login</h2>
+                    </div>
+                    <div class="card-body">
+                        <p class="status-text" id="steam-status">Status: Disconnected</p>
+                        <div class="input-group">
+                            <label for="steam-user">Username</label>
+                            <input type="text" id="steam-user" placeholder="Steam Username">
+                        </div>
+                        <div class="input-group">
+                            <label for="steam-pass">Password</label>
+                            <input type="password" id="steam-pass" placeholder="Steam Password">
+                        </div>
+                        <div class="input-group hidden" id="steam-guard-group">
+                            <label for="steam-code">Steam Guard Code</label>
+                            <input type="text" id="steam-code" placeholder="Email/App Code">
+                        </div>
+                        <button id="steam-login-btn" class="btn primary-btn">Connect to Steam</button>
                     </div>
                 </section>
 
@@ -53,7 +106,19 @@
                                 <button id="fetch-history" class="btn secondary-btn">Fetch</button>
                             </div>
                         </div>
-                        <button id="download-all" class="btn success-btn full-width hidden">Download All New</button>
+                        <div class="input-group">
+                            <label>
+                                <input type="checkbox" id="history-turbo-only">
+                                Turbo games only
+                            </label>
+                        </div>
+                        <div class="input-group">
+                            <label>
+                                <input type="checkbox" id="history-use-gc">
+                                Use GC (for private profiles)
+                            </label>
+                        </div>
+                        <p id="download-status" class="download-status hidden"></p>
                         <div id="history-results" class="history-list custom-scrollbar"></div>
                     </div>
                 </section>
@@ -119,6 +184,44 @@
                     </div>
                     <div class="card-body">
                         <div id="conclusion" class="conclusion-box"></div>
+                        <div id="graphs-section" class="graphs-section hidden">
+                            <h3>Visualizations - Confirmed Reports</h3>
+                            <div class="graphs-grid">
+                                <div class="graph-container">
+                                    <canvas id="confirmedTeamEnemyChart"></canvas>
+                                </div>
+                                <div class="graph-container">
+                                    <canvas id="confirmedStatusChart"></canvas>
+                                </div>
+                                <div class="graph-container" id="confirmedPerMatchContainer">
+                                    <canvas id="confirmedPerMatchChart"></canvas>
+                                </div>
+                                <div class="graph-container">
+                                    <canvas id="confirmedTimelineChart"></canvas>
+                                </div>
+                                <div class="graph-container">
+                                    <canvas id="confirmedTopReportersChart"></canvas>
+                                </div>
+                            </div>
+                            <h3 class="unconfirmed-section-title">Unconfirmed Reports</h3>
+                            <div class="graphs-grid">
+                                <div class="graph-container">
+                                    <canvas id="unconfirmedTeamEnemyChart"></canvas>
+                                </div>
+                                <div class="graph-container">
+                                    <canvas id="unconfirmedStatusChart"></canvas>
+                                </div>
+                                <div class="graph-container" id="unconfirmedPerMatchContainer">
+                                    <canvas id="unconfirmedPerMatchChart"></canvas>
+                                </div>
+                                <div class="graph-container">
+                                    <canvas id="unconfirmedTimelineChart"></canvas>
+                                </div>
+                                <div class="graph-container">
+                                    <canvas id="unconfirmedTopReportersChart"></canvas>
+                                </div>
+                            </div>
+                        </div>
                         <h3>Detailed Logs</h3>
                         <div id="results-log" class="results-log custom-scrollbar"></div>
                     </div>
@@ -127,8 +230,9 @@
         </main>
     </div>
 
-    <script src="app.js"></script>
-    <script src="history.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="app.js?v=3"></script>
+    <script src="history.js?v=3"></script>
 </body>
 
 </html>

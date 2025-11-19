@@ -52,11 +52,23 @@ Before using the tool, you need to configure:
     - Default location (Windows): `C:\Program Files (x86)\Steam\steamapps\common\dota 2 beta\game\dota\replays\`
     - Click "Save Settings" to save the configuration.
 
-2.  **Stratz API Token** (Optional but recommended):
+2.  **Stratz API Token** (Optional but highly recommended):
     - Get your API token from [Stratz API](https://stratz.com/api)
     - Enter the token in the "Stratz API Token" field
-    - The token is automatically saved and used for fetching match history and downloading replays
-    - This enables the "Match History" feature to fetch recent matches
+    - This enables fetching match history and finding replay URLs directly.
+
+3.  **Steam API Key** (Optional but recommended for reliability):
+    - Get your Steam Web API Key from [Steam Community](https://steamcommunity.com/dev/apikey)
+    - Enter the key in the "Steam API Key" field
+    - This serves as a fallback method to acquire replay salt/cluster info if Stratz fails.
+
+4.  **Steam Bot Account** (Optional but most reliable):
+    - The tool can log in to the Steam Game Coordinator (GC) using a Steam account to fetch replay salts directly from Valve.
+    - This is the most reliable method as it bypasses API limits and works for very new matches where WebAPI might fail (500 error).
+    - **Usage**: 
+        - Use the "Steam GC Login" section in the web interface to log in.
+        - Or set `STEAM_USER` and `STEAM_PASS` environment variables before running the server.
+    - Note: You may need to provide a Steam Guard code via the UI if prompted.
 
 ### Features
 
@@ -68,9 +80,9 @@ Before using the tool, you need to configure:
 
 #### Match History
 - **Fetch Matches**: Enter a Steam ID and limit to fetch recent matches from Stratz
-- **Download Replays**: Click "Download" on any match to automatically download the replay file
-- **Batch Download**: Use "Download All New" to download all matches that aren't already in your local directory
-- **Add to List**: Click on any match ID to add it to your local replay list for analysis
+- **Auto Download**: Newly found matches are automatically queued for download (one at a time) as soon as the list loads
+- **Progress**: A status pill above the list shows queued/downloading/completed states so you know when replays are ready
+- **Add to List**: Click on any match ID to add it to your local replay selection for analysis (useful if a replay already exists)
 
 #### Analysis
 - **Select Replays**: Choose one or more replays from your local list
@@ -100,6 +112,9 @@ Before using the tool, you need to configure:
     -   Special hero assets (e.g., Wraith King Arcana) can alter the scoreboard layout.
 -   **Mouse Tracking**: The tool tracks the mouse cursor position of players when they have the scoreboard open to detect clicks on the report button area.
 -   **Replay Download**: The tool can automatically download replays from Valve's servers via Stratz API integration.
+-   **Rate Limiting**: All OpenDota polling is throttled to ~30 requests per minute, and downloads are serialized to avoid hitting API limits.
+-   **Fallback Mechanism**: If Stratz fails to provide replay info, the tool attempts to use Steam WebAPI (if configured) and finally falls back to OpenDota parsing.
+-   **Replay Salt**: Valve's `IDOTA2Match_570/GetMatchDetails/v1` endpoint is broken for 7.36+ matches (500 or empty), so the only reliable salt sources are GC bots (e.g. go-dota2/node-dota2) or third parties like OpenDota/Stratz when they have processed the match.
 
 ## Troubleshooting
 
@@ -110,16 +125,15 @@ Before using the tool, you need to configure:
     -   Verify the path is correct and points to your Dota 2 replays folder
     -   Ensure the directory exists and contains `.dem` files
     -   On Linux, the default path is usually `~/.steam/debian-installation/steamapps/common/dota 2 beta/game/dota/replays/`
--   **Stratz API Errors**:
-    -   Verify your API token is correct
-    -   Check that your token has the necessary permissions
-    -   Ensure you have an active internet connection
+-   **Stratz/Steam API Errors**:
+    -   Verify your API token/key is correct
+    -   Check permissions and internet connection
 -   **Replay File Not Found**:
     -   Make sure the replay file exists in your configured replay directory
     -   Replay files must be downloaded from Dota 2 or via the Match History feature
     -   Some older replays may no longer be available on Valve's servers
 -   **Download Timeout**:
-    -   Replay downloads can take several minutes, especially if the match needs to be parsed first
+    -   Replay downloads can take several minutes, especially if the match needs to be parsed first via OpenDota
     -   The download will timeout after 10 minutes - check server logs for details
     -   Large replays or slow connections may require multiple attempts
 

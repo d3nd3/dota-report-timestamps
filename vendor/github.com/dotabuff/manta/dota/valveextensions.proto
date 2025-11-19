@@ -1,0 +1,22 @@
+syntax = "proto2";
+
+package dota;
+option go_package = "github.com/dotabuff/manta/dota;dota";
+
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.FieldOptions {
+	optional bool valve_map_field = 61000;
+	optional bool valve_map_key = 61001;
+	optional int32 diff_encode_field = 61002;
+	optional bool delta_ignore = 61003;
+	optional uint32 steamml_max_entries = 61004;
+	optional bool steamml_is_timestamp = 61005;
+	optional uint32 steamlearn_count = 61006;
+}
+
+extend google.protobuf.EnumValueOptions {
+	optional string schema_friendly_name = 1000;
+	optional string schema_description = 1001;
+	optional bool schema_suppress_enumerator = 1002;
+}

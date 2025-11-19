@@ -1,0 +1,5 @@
+/manta
+/manta.test
+/replays/*.dem*
+/tmp
+/vendor

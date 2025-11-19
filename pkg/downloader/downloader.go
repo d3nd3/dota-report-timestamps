@@ -11,13 +11,126 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
+	"github.com/d3nd3/dota-report-timestamps/pkg/botclient"
+	"github.com/d3nd3/dota-report-timestamps/pkg/parser"
+	"github.com/d3nd3/dota-report-timestamps/pkg/steamapi"
+	"github.com/d3nd3/dota-report-timestamps/pkg/stratz"
 	"github.com/klauspost/compress/zstd"
 )
 
+// ProgressCallback is a function type for reporting download progress (0-100)
+type ProgressCallback func(matchID int64, progress float64)
+
+// Global map to store progress updates
+var (
+	downloadProgress = make(map[int64]float64)
+	progressMu       sync.RWMutex
+)
+
+// GetProgress returns the current download progress for a match
+func GetProgress(matchID int64) float64 {
+	progressMu.RLock()
+	defer progressMu.RUnlock()
+	return downloadProgress[matchID]
+}
+
+// SetProgress updates the progress for a match
+func SetProgress(matchID int64, progress float64) {
+	progressMu.Lock()
+	defer progressMu.Unlock()
+	downloadProgress[matchID] = progress
+}
+
+// ClearProgress removes progress for a match (e.g. when done)
+func ClearProgress(matchID int64) {
+	progressMu.Lock()
+	defer progressMu.Unlock()
+	delete(downloadProgress, matchID)
+}
+
+// ProgressWriter counts bytes written and reports progress
+type ProgressWriter struct {
+	Total      int64
+	Written    int64
+	MatchID    int64
+	LastUpdate time.Time
+}
+
+func (pw *ProgressWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	pw.Written += int64(n)
+	
+	// Update progress at most every 100ms to avoid lock contention
+	if time.Since(pw.LastUpdate) > 100*time.Millisecond {
+		if pw.Total > 0 {
+			percentage := float64(pw.Written) / float64(pw.Total) * 100
+			SetProgress(pw.MatchID, percentage)
+		}
+		pw.LastUpdate = time.Now()
+	}
+	return n, nil
+}
+
+
 var httpClient = &http.Client{
 	Timeout: 30 * time.Second,
+}
+
+var downloadClient = &http.Client{
+	Timeout: 10 * time.Minute,
+}
+
+type pendingMatch struct {
+	matchID     int64
+	jobID       int
+	replayDir   string
+	stratzToken string
+	steamAPIKey string
+	gcClient    *botclient.Client
+	requestedAt time.Time
+}
+
+var (
+	pendingMatches = make(map[int64]*pendingMatch)
+	pendingMu      sync.RWMutex
+)
+
+// Rate limiting: OpenDota free tier is ~60 calls/minute.
+// Special rule: /api/request POST calls count as 10 calls.
+// We'll use a token bucket where 1 token = 1 call cost.
+// Capacity 60, refill 1 per second.
+var rateLimiter = make(chan struct{}, 60)
+
+func init() {
+	// Fill the bucket initially
+	for i := 0; i < 60; i++ {
+		rateLimiter <- struct{}{}
+	}
+
+	// Refill routine: 1 token every second (60/min)
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		for range ticker.C {
+			select {
+			case rateLimiter <- struct{}{}:
+			default:
+				// Bucket full
+			}
+		}
+	}()
+
+	// Background worker to process pending matches
+	go processPendingMatches()
+}
+
+// waitForCost blocks until we can consume 'cost' tokens.
+func waitForCost(cost int) {
+	for i := 0; i < cost; i++ {
+		<-rateLimiter
+	}
 }
 
 func min(a, b int) int {
@@ -27,17 +140,145 @@ func min(a, b int) int {
 	return b
 }
 
-func DownloadReplay(matchID int64, replayDir string) error {
-	replayURL, err := getReplayURL(matchID)
+// constructReplayURLs generates primary and alternative replay URLs for a given match.
+// Valve has multiple replay clusters.
+// Primary format: http://replay{cluster}.valve.net/570/{matchID}_{salt}.dem.bz2
+// Perfect World (China) format: http://replay{cluster}.wmsj.cn/570/{matchID}_{salt}.dem.bz2
+func constructReplayURLs(cluster uint32, matchID int64, salt uint64) []string {
+	// Primary URL (Valve global)
+	urls := []string{
+		fmt.Sprintf("http://replay%d.valve.net/570/%d_%d.dem.bz2", cluster, matchID, salt),
+	}
+
+	// If the cluster is in China (typically > 200, but can vary), Perfect World servers might be more reliable.
+	// We'll add it as a fallback for all clusters just in case, or specifically if we suspect it's a PW match.
+	// Note: Perfect World domains sometimes change, but wmsj.cn is the standard one.
+	urls = append(urls, fmt.Sprintf("http://replay%d.wmsj.cn/570/%d_%d.dem.bz2", cluster, matchID, salt))
+
+	return urls
+}
+
+// DownloadReplay downloads a replay for the given match ID to the specified directory.
+// It tries to fetch the replay URL using Stratz (if a token is provided) or falls back to OpenDota.
+func DownloadReplay(matchID int64, replayDir string, stratzToken string, steamAPIKey string, gcClient *botclient.Client) error {
+	demFilePath := filepath.Join(replayDir, fmt.Sprintf("%d.dem", matchID))
+	if _, err := os.Stat(demFilePath); err == nil {
+		log.Printf("Replay file already exists for match %d, skipping download", matchID)
+		return nil
+	}
+
+	var replayURLs []string
+	// var err error // Removed this declaration to use the one from the loop/calls properly
+
+	// 0. Try Dota 2 GC Client (Highest Priority, Direct Access)
+	status := botclient.StatusDisconnected
+	if gcClient != nil {
+		status = gcClient.GetStatus()
+	}
+
+	if gcClient != nil && (status == botclient.StatusGCReady || status == botclient.StatusConnected) {
+		log.Printf("Attempting to get replay URL from Dota 2 GC for match %d (Status: %d)...", matchID, status)
+		cluster, salt, err := gcClient.GetReplayInfo(uint64(matchID))
+		if err == nil && cluster > 0 && salt > 0 {
+			replayURLs = constructReplayURLs(cluster, matchID, salt)
+			log.Printf("Found replay URL via Dota 2 GC: %s (and %d alternates)", replayURLs[0], len(replayURLs)-1)
+		} else {
+			log.Printf("Dota 2 GC failed: %v. Falling back to other methods.", err)
+		}
+	} else if gcClient != nil {
+		log.Printf("Skipping Dota 2 GC: Status is %d (Expected %d - GCReady/Connected). Bot might be connecting or stuck.", status, botclient.StatusGCReady)
+	}
+
+	// 1. Try Steam WebAPI first if key is available (Most reliable/authoritative)
+	if len(replayURLs) == 0 && steamAPIKey != "" {
+		log.Printf("Attempting to get replay URL from Steam WebAPI for match %d...", matchID)
+		steamClient := steamapi.NewClient(steamAPIKey)
+		clusterID, replaySalt, err := steamClient.GetReplayInfo(matchID)
+		if err != nil {
+			log.Printf("Failed to get replay URL from Steam WebAPI: %v. Falling back to Stratz.", err)
+		} else if clusterID > 0 && replaySalt > 0 {
+			replayURLs = constructReplayURLs(uint32(clusterID), matchID, uint64(replaySalt))
+			log.Printf("Found replay URL via Steam WebAPI: %s", replayURLs[0])
+		}
+	}
+
+	// 2. Try Stratz if Steam failed or no key
+	if len(replayURLs) == 0 && stratzToken != "" {
+		log.Printf("Attempting to get replay URL from Stratz for match %d...", matchID)
+		stratzURL, err := getReplayURLFromStratz(matchID, stratzToken)
+		if err != nil {
+			log.Printf("Failed to get replay URL from Stratz: %v. Falling back to OpenDota.", err)
+		} else if stratzURL != "" {
+			// Stratz returns a full URL, so we accept it as is.
+			// However, Stratz might construct it themselves.
+			// Ideally we want cluster/salt to construct fallbacks, but Stratz client just gives URL here.
+			// We'll just use the URL provided.
+			replayURLs = []string{stratzURL}
+			log.Printf("Found replay URL via Stratz: %s", stratzURL)
+		}
+	}
+
+	// 3. Fallback to OpenDota if previous methods failed
+	if len(replayURLs) == 0 {
+		log.Printf("Attempting to get replay URL from OpenDota for match %d...", matchID)
+		
+		// First check if match is parsed using has_parsed field (most reliable)
+		hasParsed, err := checkOpenDotaParsed(matchID)
+		if err != nil {
+			return fmt.Errorf("failed to check OpenDota parsed status: %w", err)
+		}
+
+		if !hasParsed {
+			log.Printf("Match %d not parsed yet on OpenDota, requesting parsing...", matchID)
+			jobID, err := RequestParsing(matchID)
+			if err != nil {
+				return fmt.Errorf("failed to request parsing: %w", err)
+			}
+			log.Printf("Parsing requested for match %d (Job ID: %d), queueing for background processing...", matchID, jobID)
+
+			// Queue for background processing instead of blocking
+			pendingMu.Lock()
+			pendingMatches[matchID] = &pendingMatch{
+				matchID:     matchID,
+				jobID:       jobID,
+				replayDir:   replayDir,
+				stratzToken: stratzToken,
+				steamAPIKey: steamAPIKey,
+				gcClient:    gcClient,
+				requestedAt: time.Now(),
+			}
+			pendingMu.Unlock()
+
+			return fmt.Errorf("match %d queued for parsing, will be processed in background", matchID)
+		}
+
+		// Now fetch the replay URL (should be available if parsed)
+		odURL, err := getReplayURL(matchID)
+		if err != nil {
+			return fmt.Errorf("failed to get replay URL from OpenDota: %w", err)
+		}
+		if odURL == "" {
+			return fmt.Errorf("replay URL is missing for match %d (may have expired)", matchID)
+		}
+		replayURLs = []string{odURL}
+	}
+
+	return downloadAndExtractReplay(replayURLs, matchID, replayDir)
+}
+
+func getReplayURLFromStratz(matchID int64, token string) (string, error) {
+	client := stratz.NewClient(token)
+	info, err := client.GetReplayInfo(matchID)
 	if err != nil {
-		return fmt.Errorf("failed to get replay URL: %w", err)
+		return "", err
 	}
 
-	if replayURL == "" {
-		return fmt.Errorf("replay URL not available for match %d (match may not be parsed yet)", matchID)
+	if info.ClusterID == 0 || info.ReplaySalt == 0 {
+		return "", fmt.Errorf("missing cluster or salt info from Stratz")
 	}
 
-	return downloadAndExtractReplay(replayURL, matchID, replayDir)
+	url := fmt.Sprintf("http://replay%d.valve.net/570/%d_%d.dem.bz2", info.ClusterID, matchID, info.ReplaySalt)
+	return url, nil
 }
 
 func RequestParsing(matchID int64) (int, error) {
@@ -49,6 +290,8 @@ func RequestParsing(matchID int64) (int, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	// Cost is 10 tokens for a POST request
+	waitForCost(10)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("failed to request parsing: %w", err)
@@ -69,17 +312,105 @@ func RequestParsing(matchID int64) (int, error) {
 		Job struct {
 			JobID int `json:"jobId"`
 		} `json:"job"`
+		JobID int `json:"jobId"` // Sometimes it's top level
 	}
 
 	if err := json.Unmarshal(body, &jobResp); err != nil {
 		return 0, fmt.Errorf("failed to unmarshal job response: %w", err)
 	}
 
-	return jobResp.Job.JobID, nil
+	id := jobResp.Job.JobID
+	if id == 0 {
+		id = jobResp.JobID
+	}
+
+	return id, nil
 }
 
 func GetReplayURL(matchID int64) (string, error) {
 	return getReplayURL(matchID)
+}
+
+// checkOpenDotaParsed checks if a match has been parsed on OpenDota by checking the has_parsed field
+func checkOpenDotaParsed(matchID int64) (bool, error) {
+	url := fmt.Sprintf("https://api.opendota.com/api/matches/%d", matchID)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return false, err
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("Accept-Encoding", "gzip, zstd")
+
+	waitForCost(1)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("failed to fetch match data: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
+	}
+
+	rawContent, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return false, fmt.Errorf("failed to read response body: %w", readErr)
+	}
+
+	// Handle compression (zstd, gzip, or none)
+	var bodyContent []byte
+	contentEncoding := resp.Header.Get("Content-Encoding")
+
+	switch contentEncoding {
+	case "zstd":
+		if r, err := zstd.NewReader(bytes.NewReader(rawContent)); err == nil {
+			defer r.Close()
+			bodyContent, _ = io.ReadAll(r)
+		}
+	case "gzip":
+		if r, err := gzip.NewReader(bytes.NewReader(rawContent)); err == nil {
+			defer r.Close()
+			bodyContent, _ = io.ReadAll(r)
+		}
+	default:
+		// Auto-detect zstd magic bytes if no header
+		if len(rawContent) > 0 && rawContent[0] != '{' && rawContent[0] != '[' {
+			if r, err := zstd.NewReader(bytes.NewReader(rawContent)); err == nil {
+				defer r.Close()
+				if d, err := io.ReadAll(r); err == nil && len(d) > 0 {
+					bodyContent = d
+				}
+			}
+		}
+	}
+
+	if len(bodyContent) == 0 {
+		bodyContent = rawContent
+	}
+
+	// Strip non-JSON prefix if any
+	if len(bodyContent) > 0 && bodyContent[0] != '{' && bodyContent[0] != '[' {
+		start := bytes.IndexByte(bodyContent, '{')
+		if start != -1 {
+			bodyContent = bodyContent[start:]
+		}
+	}
+
+	var apiResp struct {
+		OdData struct {
+			HasParsed bool `json:"has_parsed"`
+		} `json:"od_data"`
+	}
+
+	if err := json.Unmarshal(bodyContent, &apiResp); err != nil {
+		// If we can't parse, assume not parsed
+		return false, nil
+	}
+
+	return apiResp.OdData.HasParsed, nil
 }
 
 func getReplayURL(matchID int64) (string, error) {
@@ -91,20 +422,10 @@ func getReplayURL(matchID int64) (string, error) {
 	}
 
 	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
 	req.Header.Set("Accept-Encoding", "gzip, zstd")
-	req.Header.Set("Accept-Language", "en-GB,en-US;q=0.9,en;q=0.8")
-	req.Header.Set("DNT", "1")
-	req.Header.Set("Sec-Ch-Ua", `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`)
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", `"Linux"`)
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Site", "none")
-	req.Header.Set("Sec-Fetch-User", "?1")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	req.Header.Set("Priority", "u=0,i")
 
+	// Cost is 1 token for GET
+	waitForCost(1)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch match data: %w", err)
@@ -116,100 +437,48 @@ func getReplayURL(matchID int64) (string, error) {
 		return "", fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
 	}
 
-	contentEncoding := resp.Header.Get("Content-Encoding")
-
-	// OpenDota often uses zstd compression even if Content-Encoding header is not set
-	// Read the body first, then try to decompress if needed
 	rawContent, readErr := io.ReadAll(resp.Body)
 	if readErr != nil {
 		return "", fmt.Errorf("failed to read response body: %w", readErr)
 	}
 
+	// Handle compression (zstd, gzip, or none)
 	var bodyContent []byte
+	contentEncoding := resp.Header.Get("Content-Encoding")
 
-	// Check Content-Encoding header first
 	switch contentEncoding {
 	case "zstd":
-		zstdReader, err := zstd.NewReader(bytes.NewReader(rawContent))
-		if err != nil {
-			return "", fmt.Errorf("failed to create zstd reader: %w", err)
-		}
-		defer zstdReader.Close()
-		bodyContent, err = io.ReadAll(zstdReader)
-		if err != nil {
-			return "", fmt.Errorf("failed to read zstd decompressed body: %w", err)
+		if r, err := zstd.NewReader(bytes.NewReader(rawContent)); err == nil {
+			defer r.Close()
+			bodyContent, _ = io.ReadAll(r)
 		}
 	case "gzip":
-		gzReader, err := gzip.NewReader(bytes.NewReader(rawContent))
-		if err != nil {
-			return "", fmt.Errorf("failed to create gzip reader: %w", err)
-		}
-		defer gzReader.Close()
-		bodyContent, err = io.ReadAll(gzReader)
-		if err != nil {
-			return "", fmt.Errorf("failed to read gzip decompressed body: %w", err)
+		if r, err := gzip.NewReader(bytes.NewReader(rawContent)); err == nil {
+			defer r.Close()
+			bodyContent, _ = io.ReadAll(r)
 		}
 	default:
-		// No Content-Encoding header - try to detect compression
-		// Check if it looks like compressed data (doesn't start with { or [)
+		// Auto-detect zstd magic bytes if no header
 		if len(rawContent) > 0 && rawContent[0] != '{' && rawContent[0] != '[' {
-			// Try zstd decompression first (OpenDota's default)
-			zstdReader, zstdErr := zstd.NewReader(bytes.NewReader(rawContent))
-			if zstdErr == nil {
-				defer zstdReader.Close()
-				decompressed, readErr := io.ReadAll(zstdReader)
-				if readErr == nil && len(decompressed) > 0 && (decompressed[0] == '{' || decompressed[0] == '[') {
-					bodyContent = decompressed
-				} else {
-					// zstd read failed, try gzip
-					gzReader, gzErr := gzip.NewReader(bytes.NewReader(rawContent))
-					if gzErr == nil {
-						defer gzReader.Close()
-						decompressed, readErr := io.ReadAll(gzReader)
-						if readErr == nil && len(decompressed) > 0 && (decompressed[0] == '{' || decompressed[0] == '[') {
-							bodyContent = decompressed
-						} else {
-							return "", fmt.Errorf("response appears compressed but decompression failed (tried zstd and gzip), first byte: 0x%02x", rawContent[0])
-						}
-					} else {
-						return "", fmt.Errorf("response appears compressed but decompression failed (tried zstd and gzip), first byte: 0x%02x", rawContent[0])
-					}
-				}
-			} else {
-				// zstd reader creation failed, try gzip
-				gzReader, gzErr := gzip.NewReader(bytes.NewReader(rawContent))
-				if gzErr == nil {
-					defer gzReader.Close()
-					decompressed, readErr := io.ReadAll(gzReader)
-					if readErr == nil && len(decompressed) > 0 && (decompressed[0] == '{' || decompressed[0] == '[') {
-						bodyContent = decompressed
-					} else {
-						return "", fmt.Errorf("response appears compressed but gzip decompression failed, first byte: 0x%02x", rawContent[0])
-					}
-				} else {
-					return "", fmt.Errorf("response appears compressed but cannot create decompression readers, first byte: 0x%02x", rawContent[0])
+			if r, err := zstd.NewReader(bytes.NewReader(rawContent)); err == nil {
+				defer r.Close()
+				if d, err := io.ReadAll(r); err == nil && len(d) > 0 {
+					bodyContent = d
 				}
 			}
-		} else {
-			// Looks like JSON already
-			bodyContent = rawContent
 		}
 	}
 
-	// Check if response looks like JSON (starts with { or [)
+	if len(bodyContent) == 0 {
+		bodyContent = rawContent
+	}
+
+	// Strip non-JSON prefix if any
 	if len(bodyContent) > 0 && bodyContent[0] != '{' && bodyContent[0] != '[' {
-		// Try to find JSON in the response (might be embedded in HTML)
-		start := -1
-		for i := 0; i < len(bodyContent)-1; i++ {
-			if bodyContent[i] == '{' {
-				start = i
-				break
-			}
+		start := bytes.IndexByte(bodyContent, '{')
+		if start != -1 {
+			bodyContent = bodyContent[start:]
 		}
-		if start == -1 {
-			return "", fmt.Errorf("response is not JSON, content-type: %s, first 100 bytes: %q", resp.Header.Get("Content-Type"), string(bodyContent[:min(100, len(bodyContent))]))
-		}
-		bodyContent = bodyContent[start:]
 	}
 
 	var apiResp struct {
@@ -220,21 +489,19 @@ func getReplayURL(matchID int64) (string, error) {
 	}
 
 	if err := json.Unmarshal(bodyContent, &apiResp); err != nil {
-		return "", fmt.Errorf("failed to unmarshal response (content-type: %s, first 200 bytes: %q): %w", resp.Header.Get("Content-Type"), string(bodyContent[:min(200, len(bodyContent))]), err)
+		// Don't fail hard on unmarshal, just return empty
+		return "", nil
 	}
 
 	if apiResp.ReplayURL != "" {
 		return apiResp.ReplayURL, nil
 	}
 
-	if !apiResp.OdData.HasParsed {
-		return "", nil
-	}
-
-	return apiResp.ReplayURL, nil
+	// If parsed but no URL, it might have expired
+	return "", nil
 }
 
-func downloadAndExtractReplay(replayURL string, matchID int64, replayDir string) error {
+func downloadAndExtractReplay(replayURLs []string, matchID int64, replayDir string) error {
 	if err := os.MkdirAll(replayDir, os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
@@ -242,26 +509,80 @@ func downloadAndExtractReplay(replayURL string, matchID int64, replayDir string)
 	bz2FilePath := filepath.Join(replayDir, fmt.Sprintf("%d.bz2", matchID))
 
 	err := func() error {
-		getResp, err := httpClient.Get(replayURL)
-		if err != nil {
-			return fmt.Errorf("failed to download replay: %w", err)
-		}
-		defer getResp.Body.Close()
+		// Try each URL in the list
+		var lastErr error
+		for _, url := range replayURLs {
+			log.Printf("Downloading replay from: %s", url)
+			
+			// Retry loop for 502/503 errors (max 3 retries per URL)
+			for i := 0; i < 3; i++ {
+				if i > 0 {
+					time.Sleep(2 * time.Second) // Backoff slightly
+				}
 
-		if getResp.StatusCode != http.StatusOK {
-			return fmt.Errorf("download failed with status: %s", getResp.Status)
-		}
+				getResp, reqErr := downloadClient.Get(url)
+				if reqErr != nil {
+					lastErr = reqErr
+					log.Printf("Network error downloading %s: %v", url, reqErr)
+					continue // Network error, retry
+				}
 
-		bz2File, err := os.Create(bz2FilePath)
-		if err != nil {
-			return fmt.Errorf("failed to create .bz2 file: %w", err)
-		}
-		defer bz2File.Close()
+				if getResp.StatusCode == http.StatusOK {
+					// Success! Save and return
+					defer getResp.Body.Close()
+					
+					// Initialize progress
+					SetProgress(matchID, 0)
+					defer ClearProgress(matchID)
 
-		if _, err := io.Copy(bz2File, getResp.Body); err != nil {
-			return fmt.Errorf("failed to save .bz2 file: %w", err)
+					bz2File, err := os.Create(bz2FilePath)
+					if err != nil {
+						return fmt.Errorf("failed to create .bz2 file: %w", err)
+					}
+					defer bz2File.Close()
+
+					// Wrap response body with progress writer
+					contentLength := getResp.ContentLength
+					progressWriter := &ProgressWriter{
+						Total:   contentLength,
+						MatchID: matchID,
+					}
+					
+					// Use TeeReader to write to file and update progress
+					// Note: io.Copy uses the writer (bz2File) to write, but we need to intercept reads.
+					// Actually, we can wrap the reader.
+					// But wait, ProgressWriter implements Write, so we can use io.TeeReader(body, progressWriter)
+					// No, io.TeeReader returns a Reader. We need to Copy from (TeeReader(body, progressWriter)) to file.
+					// Wait, ProgressWriter is a Writer. So TeeReader(body, progressWriter) returns a reader that writes to progressWriter as it reads.
+					
+					reader := io.TeeReader(getResp.Body, progressWriter)
+
+					if _, err := io.Copy(bz2File, reader); err != nil {
+						return fmt.Errorf("failed to save .bz2 file: %w", err)
+					}
+					
+					// Ensure 100% at end
+					SetProgress(matchID, 100)
+					return nil
+				}
+
+				// If it's a temporary server error (502, 503, 504), retry
+				if getResp.StatusCode == http.StatusBadGateway || getResp.StatusCode == http.StatusServiceUnavailable || getResp.StatusCode == http.StatusGatewayTimeout {
+					getResp.Body.Close()
+					lastErr = fmt.Errorf("download failed with status: %s", getResp.Status)
+					log.Printf("Server error downloading %s: %s", url, getResp.Status)
+					continue
+				}
+
+				// Permanent error (404, etc), try next URL immediately
+				getResp.Body.Close()
+				lastErr = fmt.Errorf("download failed with status: %s", getResp.Status)
+				log.Printf("Permanent error downloading %s: %s", url, getResp.Status)
+				break 
+			}
 		}
-		return nil
+		
+		return fmt.Errorf("failed to download replay after trying all URLs: %w", lastErr)
 	}()
 
 	if err != nil {
@@ -299,40 +620,131 @@ func downloadAndExtractReplay(replayURL string, matchID int64, replayDir string)
 		log.Printf("Warning: failed to remove temp file %s: %v", bz2FilePath, err)
 	}
 
+	demFile, err := os.Open(demFilePath)
+	if err == nil {
+		if date, err := parser.GetReplayDate(demFile); err == nil {
+			log.Printf("Extracted match date for match %d: %v", matchID, date)
+		} else {
+			log.Printf("Could not extract date from replay %d: %v (using file mod time)", matchID, err)
+		}
+		demFile.Close()
+	}
+
 	return nil
 }
 
 func WaitForParsing(matchID int64, jobID int, maxWaitTime time.Duration) error {
 	deadline := time.Now().Add(maxWaitTime)
-	ticker := time.NewTicker(5 * time.Second)
+	// Poll every 10s (polite)
+	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
+
+	log.Printf("Entering wait loop for match %d (Job ID: %d), max wait: %v", matchID, jobID, maxWaitTime)
 
 	for {
 		select {
 		case <-ticker.C:
-			// Check job status first
+			if time.Now().After(deadline) {
+				return fmt.Errorf("timeout waiting for match %d", matchID)
+			}
+
+			// 1. Poll job status first
 			if jobID > 0 {
-				jobURL := fmt.Sprintf("https://api.opendota.com/api/request/%d", jobID)
-				jobResp, err := httpClient.Get(jobURL)
+				url := fmt.Sprintf("https://api.opendota.com/api/request/%d", jobID)
+				req, _ := http.NewRequest("GET", url, nil)
+				waitForCost(1)
+				resp, err := httpClient.Do(req)
 				if err == nil {
-					jobResp.Body.Close()
+					resp.Body.Close()
 				}
 			}
 
-			// Check if match is parsed by checking for replay URL
-			replayURL, err := getReplayURL(matchID)
+			// 2. Check if match is ready via main endpoint using has_parsed (most reliable)
+			hasParsed, err := checkOpenDotaParsed(matchID)
 			if err != nil {
-				log.Printf("Error checking replay URL for match %d: %v", matchID, err)
+				log.Printf("Error checking parsed status for match %d: %v", matchID, err)
 				continue
 			}
-			if replayURL != "" {
+
+			if hasParsed {
+				// Match is parsed, now check for replay URL
+				replayURL, err := getReplayURL(matchID)
+				if err == nil && replayURL != "" {
+					log.Printf("Match %d parsed! Replay URL: %s", matchID, replayURL)
+					return nil
+				}
+				// If parsed but no URL, might have expired - but parsing is done
+				log.Printf("Match %d is parsed but replay URL is missing (may have expired)", matchID)
 				return nil
 			}
-			if time.Now().After(deadline) {
-				return fmt.Errorf("timeout waiting for match %d to be parsed", matchID)
-			}
+
+			log.Printf("Match %d still pending...", matchID)
+
 		case <-time.After(maxWaitTime):
-			return fmt.Errorf("timeout waiting for match %d to be parsed", matchID)
+			return fmt.Errorf("timeout waiting for match %d", matchID)
+		}
+	}
+}
+
+func processPendingMatches() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		pendingMu.Lock()
+		var toProcess []*pendingMatch
+		for matchID, pm := range pendingMatches {
+			if time.Since(pm.requestedAt) > 10*time.Minute {
+				log.Printf("Removing expired pending match %d", matchID)
+				delete(pendingMatches, matchID)
+				continue
+			}
+			toProcess = append(toProcess, pm)
+		}
+		pendingMu.Unlock()
+
+		for _, pm := range toProcess {
+			hasParsed, err := checkOpenDotaParsed(pm.matchID)
+			if err != nil {
+				log.Printf("Error checking parsed status for pending match %d: %v", pm.matchID, err)
+				continue
+			}
+
+			if hasParsed {
+				log.Printf("Pending match %d is now parsed, checking if already exists...", pm.matchID)
+				
+				demFilePath := filepath.Join(pm.replayDir, fmt.Sprintf("%d.dem", pm.matchID))
+				if _, err := os.Stat(demFilePath); err == nil {
+					log.Printf("Replay file already exists for match %d, skipping download", pm.matchID)
+					pendingMu.Lock()
+					delete(pendingMatches, pm.matchID)
+					pendingMu.Unlock()
+					continue
+				}
+
+				log.Printf("Completing download for match %d...", pm.matchID)
+				pendingMu.Lock()
+				delete(pendingMatches, pm.matchID)
+				pendingMu.Unlock()
+
+				replayURL, err := getReplayURL(pm.matchID)
+				if err != nil {
+					log.Printf("Error getting replay URL for match %d: %v", pm.matchID, err)
+					continue
+				}
+				if replayURL == "" {
+					log.Printf("Replay URL missing for match %d (may have expired)", pm.matchID)
+					continue
+				}
+
+				if err := downloadAndExtractReplay([]string{replayURL}, pm.matchID, pm.replayDir); err != nil {
+					log.Printf("Error downloading replay for match %d: %v", pm.matchID, err)
+				} else {
+					log.Printf("Successfully downloaded replay for match %d", pm.matchID)
+				}
+			} else {
+				log.Printf("Pending match %d still waiting for parsing...", pm.matchID)
+			}
 		}
 	}
 }
