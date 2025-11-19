@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dota 2 Report Timestamp Parser</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+    <div class="app-container">
+        <header class="main-header">
+            <div class="header-content">
+                <h1>Dota 2 Report Parser</h1>
+                <p>Detect scoreboard usage and report button clicks in replays</p>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <aside class="sidebar">
+                <section id="config-section" class="card">
+                    <div class="card-header">
+                        <h2>Configuration</h2>
+                    </div>
+                    <div class="card-body">
+                        <div class="input-group">
+                            <label for="replay-dir">Replay Directory</label>
+                            <input type="text" id="replay-dir" placeholder="/path/to/replays/">
+                        </div>
+                        <div class="input-group">
+                            <label for="stratz-api-token">Stratz API Token</label>
+                            <input type="password" id="stratz-api-token" placeholder="Your Stratz API token" autocomplete="off">
+                        </div>
+                        <button id="save-config" class="btn secondary-btn">Save Settings</button>
+                    </div>
+                </section>
+
+                <section id="history-section" class="card">
+                    <div class="card-header">
+                        <h2>Match History</h2>
+                    </div>
+                    <div class="card-body">
+                        <div class="input-group">
+                            <label for="history-steam-id">Steam ID</label>
+                            <input type="number" id="history-steam-id" placeholder="e.g. 76561198...">
+                        </div>
+                        <div class="input-group">
+                            <label for="history-limit">Limit</label>
+                            <div class="row-group">
+                                <input type="number" id="history-limit" value="10" min="1" max="100">
+                                <button id="fetch-history" class="btn secondary-btn">Fetch</button>
+                            </div>
+                        </div>
+                        <button id="download-all" class="btn success-btn full-width hidden">Download All New</button>
+                        <div id="history-results" class="history-list custom-scrollbar"></div>
+                    </div>
+                </section>
+            </aside>
+
+            <div class="content-area">
+                <section id="selection-section" class="card">
+                    <div class="card-header">
+                        <h2>Local Replays</h2>
+                        <div class="header-controls">
+                            <button id="refresh-replays" class="btn icon-btn" title="Refresh">↻</button>
+                            <button id="sort-date" class="btn text-btn">Sort: Newest</button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="selection-controls">
+                            <div class="btn-group">
+                                <button id="select-all" class="btn small-btn">All</button>
+                                <button id="deselect-all" class="btn small-btn">None</button>
+                            </div>
+                            <button id="delete-selected" class="btn danger-btn small-btn">Delete Selected</button>
+                        </div>
+                        <div id="replay-list" class="replay-list custom-scrollbar">
+                            <p class="loading">Loading replays...</p>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="parse-section" class="card">
+                    <div class="card-header">
+                        <h2>Analysis Options</h2>
+                    </div>
+                    <div class="card-body">
+                        <div class="parse-controls">
+                            <div class="input-group">
+                                <label for="steam-id">Target Steam ID <span class="optional">(Optional)</span></label>
+                                <input type="number" id="steam-id" placeholder="e.g. 76561198...">
+                            </div>
+                            <div class="input-group">
+                                <label for="slot-id">Target Slot ID <span class="optional">(Optional)</span></label>
+                                <input type="number" id="slot-id" placeholder="0-9">
+                            </div>
+                        </div>
+                        <button id="start-parse" class="btn primary-btn large-btn">Start Analysis</button>
+                    </div>
+                </section>
+
+                <section id="progress-section" class="card hidden">
+                    <div class="card-body">
+                        <div class="progress-info">
+                            <h3>Processing...</h3>
+                            <p id="progress-text">0 / 0</p>
+                        </div>
+                        <div class="progress-container">
+                            <div id="progress-bar" class="progress-bar"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <section id="results-section" class="card hidden">
+                    <div class="card-header">
+                        <h2>Results</h2>
+                    </div>
+                    <div class="card-body">
+                        <div id="conclusion" class="conclusion-box"></div>
+                        <h3>Detailed Logs</h3>
+                        <div id="results-log" class="results-log custom-scrollbar"></div>
+                    </div>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <script src="app.js"></script>
+    <script src="history.js"></script>
+</body>
+
+</html>
