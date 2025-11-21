@@ -86,7 +86,10 @@
                             <label for="steam-code">Steam Guard Code</label>
                             <input type="text" id="steam-code" placeholder="Email/App Code">
                         </div>
-                        <button id="steam-login-btn" class="btn primary-btn">Connect to Steam</button>
+                        <div style="display: flex; gap: 10px;">
+                            <button id="steam-login-btn" class="btn primary-btn">Connect to Steam</button>
+                            <button id="steam-disconnect-btn" class="btn" style="display: none; background-color: #f44336; color: white;">Disconnect</button>
+                        </div>
                     </div>
                 </section>
 
@@ -138,6 +141,10 @@
                             <div class="btn-group">
                                 <button id="select-all" class="btn small-btn">All</button>
                                 <button id="deselect-all" class="btn small-btn">None</button>
+                                <div class="select-last-group">
+                                    <input type="number" id="select-last-count" class="select-last-input" placeholder="X" min="1" value="10">
+                                    <button id="select-last" class="btn small-btn">Last X</button>
+                                </div>
                             </div>
                             <button id="delete-selected" class="btn danger-btn small-btn">Delete Selected</button>
                         </div>
@@ -152,14 +159,17 @@
                         <h2>Analysis Options</h2>
                     </div>
                     <div class="card-body">
-                        <div class="parse-controls">
-                            <div class="input-group">
-                                <label for="steam-id">Target Steam ID <span class="optional">(Optional)</span></label>
-                                <input type="number" id="steam-id" placeholder="e.g. 76561198...">
-                            </div>
-                            <div class="input-group">
-                                <label for="slot-id">Target Slot ID <span class="optional">(Optional)</span></label>
-                                <input type="number" id="slot-id" placeholder="0-9">
+                        <div class="input-group" id="steam-id-group">
+                            <label for="steam-id">Target Steam ID <span class="optional">(For multiple replays)</span></label>
+                            <input type="text" id="steam-id" placeholder="e.g. 76561198..." pattern="[0-9]*" inputmode="numeric">
+                        </div>
+                        <div class="input-group hidden" id="player-selection-group">
+                            <label for="player-select">Select Player</label>
+                            <div class="select-wrapper">
+                                <select id="player-select" class="full-width">
+                                    <option value="-1">Select a player...</option>
+                                </select>
+                                <div id="player-select-spinner" class="loading-spinner hidden"></div>
                             </div>
                         </div>
                         <button id="start-parse" class="btn primary-btn large-btn">Start Analysis</button>
@@ -183,7 +193,25 @@
                         <h2>Results</h2>
                     </div>
                     <div class="card-body">
-                        <div id="conclusion" class="conclusion-box"></div>
+                        <div id="match-selector-container" class="match-selector-container hidden">
+                            <label for="match-selector">Select Match:</label>
+                            <select id="match-selector" class="match-selector">
+                                <option value="">Select a match...</option>
+                            </select>
+                        </div>
+                        <div id="player-selector-container" class="player-selector-container hidden">
+                            <label for="player-selector">Select Player (who received reports):</label>
+                            <div class="custom-select-wrapper">
+                                <div id="player-selector-display" class="custom-select-display">
+                                    <span class="select-placeholder">Select a player...</span>
+                                </div>
+                                <div id="player-selector-dropdown" class="custom-select-dropdown hidden">
+                                </div>
+                            </div>
+                        </div>
+                        <div id="timeline-graph-container" class="timeline-graph-container">
+                            <canvas id="timeline-graph"></canvas>
+                        </div>
                         <div id="graphs-section" class="graphs-section hidden">
                             <h3>Visualizations - Confirmed Reports</h3>
                             <div class="graphs-grid">
@@ -221,9 +249,15 @@
                                     <canvas id="unconfirmedTopReportersChart"></canvas>
                                 </div>
                             </div>
+                            <div id="playerReportsPerMatchSection" class="graphs-section" style="display: none;">
+                                <h3>Player Reports Per Match</h3>
+                                <div class="graphs-grid">
+                                    <div class="graph-container">
+                                        <canvas id="playerReportsPerMatchChart"></canvas>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
-                        <h3>Detailed Logs</h3>
-                        <div id="results-log" class="results-log custom-scrollbar"></div>
                     </div>
                 </section>
             </div>

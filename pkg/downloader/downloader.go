@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,7 +63,7 @@ type ProgressWriter struct {
 func (pw *ProgressWriter) Write(p []byte) (int, error) {
 	n := len(p)
 	pw.Written += int64(n)
-	
+
 	// Update progress at most every 100ms to avoid lock contention
 	if time.Since(pw.LastUpdate) > 100*time.Millisecond {
 		if pw.Total > 0 {
@@ -73,7 +74,6 @@ func (pw *ProgressWriter) Write(p []byte) (int, error) {
 	}
 	return n, nil
 }
-
 
 var httpClient = &http.Client{
 	Timeout: 30 * time.Second,
@@ -221,10 +221,26 @@ func DownloadReplay(matchID int64, replayDir string, stratzToken string, steamAP
 	// 3. Fallback to OpenDota if previous methods failed
 	if len(replayURLs) == 0 {
 		log.Printf("Attempting to get replay URL from OpenDota for match %d...", matchID)
-		
+
 		// First check if match is parsed using has_parsed field (most reliable)
 		hasParsed, err := checkOpenDotaParsed(matchID)
 		if err != nil {
+			// If OpenDota is down (521) or having server issues (5xx), queue for retry
+			if strings.Contains(err.Error(), "status code 521") || strings.Contains(err.Error(), "status code 5") {
+				log.Printf("OpenDota is temporarily unavailable for match %d, queueing for background retry...", matchID)
+				pendingMu.Lock()
+				pendingMatches[matchID] = &pendingMatch{
+					matchID:     matchID,
+					jobID:       0, // No job ID yet, will check again later
+					replayDir:   replayDir,
+					stratzToken: stratzToken,
+					steamAPIKey: steamAPIKey,
+					gcClient:    gcClient,
+					requestedAt: time.Now(),
+				}
+				pendingMu.Unlock()
+				return fmt.Errorf("match %d queued for retry (OpenDota temporarily unavailable)", matchID)
+			}
 			return fmt.Errorf("failed to check OpenDota parsed status: %w", err)
 		}
 
@@ -232,6 +248,22 @@ func DownloadReplay(matchID int64, replayDir string, stratzToken string, steamAP
 			log.Printf("Match %d not parsed yet on OpenDota, requesting parsing...", matchID)
 			jobID, err := RequestParsing(matchID)
 			if err != nil {
+				// If OpenDota is down (521) or having server issues (5xx), queue for retry
+				if strings.Contains(err.Error(), "status code 521") || strings.Contains(err.Error(), "status code 5") {
+					log.Printf("OpenDota is temporarily unavailable for match %d, queueing for background retry...", matchID)
+					pendingMu.Lock()
+					pendingMatches[matchID] = &pendingMatch{
+						matchID:     matchID,
+						jobID:       0, // No job ID yet, will check again later
+						replayDir:   replayDir,
+						stratzToken: stratzToken,
+						steamAPIKey: steamAPIKey,
+						gcClient:    gcClient,
+						requestedAt: time.Now(),
+					}
+					pendingMu.Unlock()
+					return fmt.Errorf("match %d queued for retry (OpenDota temporarily unavailable)", matchID)
+				}
 				return fmt.Errorf("failed to request parsing: %w", err)
 			}
 			log.Printf("Parsing requested for match %d (Job ID: %d), queueing for background processing...", matchID, jobID)
@@ -255,6 +287,22 @@ func DownloadReplay(matchID int64, replayDir string, stratzToken string, steamAP
 		// Now fetch the replay URL (should be available if parsed)
 		odURL, err := getReplayURL(matchID)
 		if err != nil {
+			// If OpenDota is down (521) or having server issues (5xx), queue for retry
+			if strings.Contains(err.Error(), "status code 521") || strings.Contains(err.Error(), "status code 5") {
+				log.Printf("OpenDota is temporarily unavailable for match %d, queueing for background retry...", matchID)
+				pendingMu.Lock()
+				pendingMatches[matchID] = &pendingMatch{
+					matchID:     matchID,
+					jobID:       0, // No job ID yet, will check again later
+					replayDir:   replayDir,
+					stratzToken: stratzToken,
+					steamAPIKey: steamAPIKey,
+					gcClient:    gcClient,
+					requestedAt: time.Now(),
+				}
+				pendingMu.Unlock()
+				return fmt.Errorf("match %d queued for retry (OpenDota temporarily unavailable)", matchID)
+			}
 			return fmt.Errorf("failed to get replay URL from OpenDota: %w", err)
 		}
 		if odURL == "" {
@@ -274,7 +322,14 @@ func getReplayURLFromStratz(matchID int64, token string) (string, error) {
 	}
 
 	if info.ClusterID == 0 || info.ReplaySalt == 0 {
-		return "", fmt.Errorf("missing cluster or salt info from Stratz")
+		// Log more details about why we're missing this data
+		if info.ClusterID == 0 && info.ReplaySalt == 0 {
+			return "", fmt.Errorf("missing cluster or salt info from Stratz (match %d may not have replay data available yet)", matchID)
+		} else if info.ClusterID == 0 {
+			return "", fmt.Errorf("missing cluster ID from Stratz for match %d (replaySalt: %d)", matchID, info.ReplaySalt)
+		} else {
+			return "", fmt.Errorf("missing replay salt from Stratz for match %d (clusterID: %d)", matchID, info.ClusterID)
+		}
 	}
 
 	url := fmt.Sprintf("http://replay%d.valve.net/570/%d_%d.dem.bz2", info.ClusterID, matchID, info.ReplaySalt)
@@ -297,6 +352,18 @@ func RequestParsing(matchID int64) (int, error) {
 		return 0, fmt.Errorf("failed to request parsing: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Handle Cloudflare 521 (Web Server Is Down) and other transient errors
+	if resp.StatusCode == 521 {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("unexpected status code 521: OpenDota server is down (Cloudflare error). Body: %s", string(body))
+	}
+
+	// Handle other 5xx errors as potentially transient
+	if resp.StatusCode >= 500 && resp.StatusCode < 600 {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("unexpected status code %d: OpenDota server error (may be temporary). Body: %s", resp.StatusCode, string(body))
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -349,6 +416,18 @@ func checkOpenDotaParsed(matchID int64) (bool, error) {
 		return false, fmt.Errorf("failed to fetch match data: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Handle Cloudflare 521 (Web Server Is Down) and other transient errors
+	if resp.StatusCode == 521 {
+		body, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("unexpected status code 521: OpenDota server is down (Cloudflare error). Body: %s", string(body))
+	}
+
+	// Handle other 5xx errors as potentially transient
+	if resp.StatusCode >= 500 && resp.StatusCode < 600 {
+		body, _ := io.ReadAll(resp.Body)
+		return false, fmt.Errorf("unexpected status code %d: OpenDota server error (may be temporary). Body: %s", resp.StatusCode, string(body))
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -432,6 +511,18 @@ func getReplayURL(matchID int64) (string, error) {
 	}
 	defer resp.Body.Close()
 
+	// Handle Cloudflare 521 (Web Server Is Down) and other transient errors
+	if resp.StatusCode == 521 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("unexpected status code 521: OpenDota server is down (Cloudflare error). Body: %s", string(body))
+	}
+
+	// Handle other 5xx errors as potentially transient
+	if resp.StatusCode >= 500 && resp.StatusCode < 600 {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("unexpected status code %d: OpenDota server error (may be temporary). Body: %s", resp.StatusCode, string(body))
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return "", fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
@@ -513,7 +604,7 @@ func downloadAndExtractReplay(replayURLs []string, matchID int64, replayDir stri
 		var lastErr error
 		for _, url := range replayURLs {
 			log.Printf("Downloading replay from: %s", url)
-			
+
 			// Retry loop for 502/503 errors (max 3 retries per URL)
 			for i := 0; i < 3; i++ {
 				if i > 0 {
@@ -530,7 +621,7 @@ func downloadAndExtractReplay(replayURLs []string, matchID int64, replayDir stri
 				if getResp.StatusCode == http.StatusOK {
 					// Success! Save and return
 					defer getResp.Body.Close()
-					
+
 					// Initialize progress
 					SetProgress(matchID, 0)
 					defer ClearProgress(matchID)
@@ -547,20 +638,20 @@ func downloadAndExtractReplay(replayURLs []string, matchID int64, replayDir stri
 						Total:   contentLength,
 						MatchID: matchID,
 					}
-					
+
 					// Use TeeReader to write to file and update progress
 					// Note: io.Copy uses the writer (bz2File) to write, but we need to intercept reads.
 					// Actually, we can wrap the reader.
 					// But wait, ProgressWriter implements Write, so we can use io.TeeReader(body, progressWriter)
 					// No, io.TeeReader returns a Reader. We need to Copy from (TeeReader(body, progressWriter)) to file.
 					// Wait, ProgressWriter is a Writer. So TeeReader(body, progressWriter) returns a reader that writes to progressWriter as it reads.
-					
+
 					reader := io.TeeReader(getResp.Body, progressWriter)
 
 					if _, err := io.Copy(bz2File, reader); err != nil {
 						return fmt.Errorf("failed to save .bz2 file: %w", err)
 					}
-					
+
 					// Ensure 100% at end
 					SetProgress(matchID, 100)
 					return nil
@@ -578,10 +669,10 @@ func downloadAndExtractReplay(replayURLs []string, matchID int64, replayDir stri
 				getResp.Body.Close()
 				lastErr = fmt.Errorf("download failed with status: %s", getResp.Status)
 				log.Printf("Permanent error downloading %s: %s", url, getResp.Status)
-				break 
+				break
 			}
 		}
-		
+
 		return fmt.Errorf("failed to download replay after trying all URLs: %w", lastErr)
 	}()
 
@@ -706,13 +797,18 @@ func processPendingMatches() {
 		for _, pm := range toProcess {
 			hasParsed, err := checkOpenDotaParsed(pm.matchID)
 			if err != nil {
+				// If OpenDota is still down, log and continue (will retry next cycle)
+				if strings.Contains(err.Error(), "status code 521") || strings.Contains(err.Error(), "status code 5") {
+					log.Printf("OpenDota still unavailable for pending match %d: %v (will retry)", pm.matchID, err)
+					continue
+				}
 				log.Printf("Error checking parsed status for pending match %d: %v", pm.matchID, err)
 				continue
 			}
 
 			if hasParsed {
 				log.Printf("Pending match %d is now parsed, checking if already exists...", pm.matchID)
-				
+
 				demFilePath := filepath.Join(pm.replayDir, fmt.Sprintf("%d.dem", pm.matchID))
 				if _, err := os.Stat(demFilePath); err == nil {
 					log.Printf("Replay file already exists for match %d, skipping download", pm.matchID)

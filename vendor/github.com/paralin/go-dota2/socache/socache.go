@@ -47,10 +47,9 @@ func (c *SOCache) HandleSubscribed(msg *gcsdkm.CMsgSOCacheSubscribed) error {
 		}
 
 		ctr, err := c.GetContainerForTypeID(uint32(obj.GetTypeId())) //nolint:gosec
-		if err != nil {
-			continue
+		if err == nil {
+			err = ctr.HandleSubscribed(msg, obj)
 		}
-		err = ctr.HandleSubscribed(msg, obj)
 
 		if retErr == nil && err != nil {
 			retErr = err

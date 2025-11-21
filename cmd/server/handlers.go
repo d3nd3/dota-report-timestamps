@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -123,16 +124,70 @@ func handleSteamLogin(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
 	} else {
 		// Standard login request
+		// Check current status first - if already connecting/connected, return current status
+		// StatusNeedGuardCode is NOT included here - we allow re-init to start fresh connection
+		currentStatus := gcClient.GetStatus()
+		if currentStatus == botclient.StatusConnecting ||
+			currentStatus == botclient.StatusConnected ||
+			currentStatus == botclient.StatusGCReady {
+			log.Printf("Steam client already in state %d, returning current status", currentStatus)
+			// Return current status without re-initializing
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"status":  int(currentStatus),
+				"message": "Already connected or connecting",
+			})
+			return
+		}
+
+		// Init if disconnected or StatusNeedGuardCode (allows fresh connection attempt)
 		if err := gcClient.Init(config.SteamUser, config.SteamPass); err != nil {
+			log.Printf("Failed to initialize Steam client: %v", err)
 			http.Error(w, "Failed to connect: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// Give it a moment to start connecting
+		time.Sleep(500 * time.Millisecond)
 	}
 
+	// Poll status a few times to get the most up-to-date state
 	status := gcClient.GetStatus()
+	for i := 0; i < 3 && (status == botclient.StatusDisconnected || status == botclient.StatusConnecting); i++ {
+		time.Sleep(200 * time.Millisecond)
+		status = gcClient.GetStatus()
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"status":  int(status),
+	})
+}
+
+func handleSteamDisconnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if gcClient == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Already disconnected",
+		})
+		return
+	}
+
+	log.Printf("Disconnecting Steam client...")
+	if err := gcClient.Disconnect(); err != nil {
+		log.Printf("Failed to disconnect: %v", err)
+		http.Error(w, "Failed to disconnect: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("Steam client disconnected successfully")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Disconnected successfully",
 	})
 }
 
@@ -293,6 +348,139 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": fmt.Sprintf("Replay file %s deleted successfully", fileName),
 	})
+}
+
+type PlayerInfoRequest struct {
+	MatchID     string `json:"matchId"`
+	ProfileName string `json:"profileName"`
+}
+
+func handlePlayerInfo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req PlayerInfoRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	matchID, err := strconv.ParseInt(req.MatchID, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid match ID", http.StatusBadRequest)
+		return
+	}
+
+	replayDir := getProfileReplayDir(req.ProfileName)
+	filePath := filepath.Join(replayDir, req.MatchID+".dem")
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		http.Error(w, fmt.Sprintf("Replay file not found: %s.dem", req.MatchID), http.StatusNotFound)
+		return
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		http.Error(w, "Could not open replay file: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer file.Close()
+
+	players, err := parser.ExtractPlayerInfo(matchID, file)
+	if err != nil {
+		http.Error(w, "Error extracting player info: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(players)
+}
+
+func handleHeroIcon(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	heroId := strings.TrimPrefix(r.URL.Path, "/api/hero-icon/")
+	if heroId == "" {
+		http.Error(w, "Missing hero ID", http.StatusBadRequest)
+		return
+	}
+
+	heroId = strings.TrimSuffix(heroId, "_icon.png")
+	heroId = strings.TrimSuffix(heroId, "_full.png")
+	heroId = strings.TrimSuffix(heroId, "_icon")
+	heroId = strings.TrimSuffix(heroId, "_full")
+	heroId = strings.Split(heroId, "?")[0]
+	heroId = strings.TrimSpace(heroId)
+
+	if heroId == "" {
+		log.Printf("Invalid hero ID from path: %s", r.URL.Path)
+		http.Error(w, "Invalid hero ID", http.StatusBadRequest)
+		return
+	}
+
+	heroIdMapping := map[string]string{
+		"zeus": "zuus",
+	}
+	if mappedId, ok := heroIdMapping[heroId]; ok {
+		heroId = mappedId
+	}
+
+	log.Printf("Fetching hero icon for: %s", heroId)
+
+	heroesWithoutIcon := map[string]bool{
+		"primal_beast": true,
+		"ringmaster":   true,
+		"marci":        true,
+		"muerta":       true,
+	}
+
+	var iconUrl string
+	if heroId == "kez" || heroesWithoutIcon[heroId] {
+		iconUrl = fmt.Sprintf("https://cdn.cloudflare.steamstatic.com/apps/dota2/images/heroes/%s_full.png", heroId)
+	} else {
+		iconUrl = fmt.Sprintf("https://cdn.cloudflare.steamstatic.com/apps/dota2/images/heroes/%s_icon.png", heroId)
+	}
+
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+	resp, err := client.Get(iconUrl)
+	if err != nil {
+		log.Printf("Failed to fetch hero icon %s: %v", iconUrl, err)
+		http.Error(w, fmt.Sprintf("Failed to fetch icon: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		if !heroesWithoutIcon[heroId] && heroId != "kez" {
+			log.Printf("Hero icon %s returned status %d, trying full image", iconUrl, resp.StatusCode)
+			fullUrl := fmt.Sprintf("https://cdn.cloudflare.steamstatic.com/apps/dota2/images/heroes/%s_full.png", heroId)
+			resp2, err2 := client.Get(fullUrl)
+			if err2 != nil {
+				log.Printf("Failed to fetch hero full image %s: %v", fullUrl, err2)
+				http.Error(w, fmt.Sprintf("Failed to fetch icon: status %d", resp.StatusCode), http.StatusInternalServerError)
+				return
+			}
+			defer resp2.Body.Close()
+			if resp2.StatusCode == http.StatusOK {
+				w.Header().Set("Content-Type", resp2.Header.Get("Content-Type"))
+				w.Header().Set("Cache-Control", "public, max-age=86400")
+				io.Copy(w, resp2.Body)
+				return
+			}
+			log.Printf("Hero full image %s also returned status %d", fullUrl, resp2.StatusCode)
+		}
+		http.Error(w, fmt.Sprintf("Failed to fetch icon: status %d", resp.StatusCode), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	io.Copy(w, resp.Body)
 }
 
 type ParseRequest struct {

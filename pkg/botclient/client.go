@@ -55,6 +55,18 @@ func (c *Client) SubmitCode(code string) error {
 	return nil
 }
 
+func (c *Client) Disconnect() error {
+	resp, err := http.Post(c.baseURL+"/disconnect", "application/json", bytes.NewBuffer([]byte("{}")))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("disconnect failed: %s", resp.Status)
+	}
+	return nil
+}
+
 func (c *Client) GetStatus() ConnectionStatus {
 	resp, err := http.Get(c.baseURL + "/status")
 	if err != nil {

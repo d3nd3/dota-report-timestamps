@@ -154,7 +154,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     window.updateHistoryStatus = function() {
-        fetch('/api/replays?t=' + Date.now())
+        const profileName = getSelectedProfileName();
+        const url = '/api/replays?t=' + Date.now() + (profileName ? '&profile=' + encodeURIComponent(profileName) : '');
+        fetch(url)
             .then(res => res.json())
             .then(replays => {
                 const safeReplays = replays || [];
@@ -328,10 +330,14 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (status) {
                         status.textContent = 'Downloaded';
                         status.className = 'status-pill status-success';
+                        status.style.display = 'inline-flex';
                     }
                     
                     if (window.loadReplays) {
                         setTimeout(() => window.loadReplays(), 500);
+                    }
+                    if (window.updateHistoryStatus) {
+                        setTimeout(() => window.updateHistoryStatus(), 1000);
                     }
                     resolve(data);
                 } else if (data.status === 'queued') {

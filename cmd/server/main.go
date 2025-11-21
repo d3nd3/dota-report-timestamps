@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/d3nd3/dota-report-timestamps/pkg/botclient"
@@ -21,6 +22,18 @@ type Config struct {
 
 var config Config
 var gcClient *botclient.Client
+
+func noCacheJS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".js") {
+			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+			w.Header().Set("Pragma", "no-cache")
+			w.Header().Set("Expires", "0")
+			w.Header().Del("ETag")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 func main() {
 	// Default config
@@ -53,19 +66,22 @@ func main() {
 
 	// Serve static files
 	fs := http.FileServer(http.Dir("./cmd/server/static"))
-	http.Handle("/", fs)
+	http.Handle("/", noCacheJS(fs))
 
 	// API endpoints
 	http.HandleFunc("/api/config", handleConfig)
 	http.HandleFunc("/api/replays", handleReplays)
+	http.HandleFunc("/api/player-info", handlePlayerInfo)
 	http.HandleFunc("/api/parse", handleParse)
 	http.HandleFunc("/api/history", handleHistory)
 	http.HandleFunc("/api/download", handleDownload)
 	http.HandleFunc("/api/progress", handleProgress)
 	http.HandleFunc("/api/delete", handleDelete)
+	http.HandleFunc("/api/hero-icon/", handleHeroIcon)
 	
 	// Steam GC endpoints
 	http.HandleFunc("/api/steam/login", handleSteamLogin)
+	http.HandleFunc("/api/steam/disconnect", handleSteamDisconnect)
 	http.HandleFunc("/api/steam/status", handleSteamStatus)
 
 	fmt.Println("Server started at http://localhost:8081")

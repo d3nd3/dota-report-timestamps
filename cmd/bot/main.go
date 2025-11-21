@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/d3nd3/dota-report-timestamps/pkg/dota2gc"
 )
@@ -43,6 +44,7 @@ func main() {
 
 	http.HandleFunc("/init", handleInit)
 	http.HandleFunc("/submit-code", handleSubmitCode)
+	http.HandleFunc("/disconnect", handleDisconnect)
 	http.HandleFunc("/status", handleStatus)
 	http.HandleFunc("/replay-info", handleReplayInfo)
 	http.HandleFunc("/player-match-history", handlePlayerMatchHistory)
@@ -64,16 +66,26 @@ func handleInit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	mu.Lock()
-	defer mu.Unlock()
-
+	
+	// Close existing client if any, and wait for cleanup
 	if client != nil {
+		log.Printf("Closing existing client before reinitializing...")
 		client.Close()
+		client = nil
+		// Give a moment for cleanup to complete
+		time.Sleep(500 * time.Millisecond)
 	}
 
 	log.Printf("Initializing bot for user %s", req.Username)
 	client = dota2gc.NewClient(req.Username, req.Password)
+	
+	mu.Unlock() // Release lock before potentially blocking Connect()
+	
 	if err := client.Connect(); err != nil {
 		log.Printf("Failed to connect: %v", err)
+		mu.Lock()
+		client = nil
+		mu.Unlock()
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -104,6 +116,37 @@ func handleSubmitCode(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Submitting code: %s", req.Code)
 	client.SubmitCode(req.Code)
 	w.WriteHeader(http.StatusOK)
+}
+
+func handleDisconnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if client == nil {
+		// Already disconnected
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "Already disconnected",
+		})
+		return
+	}
+
+	log.Printf("Disconnecting Steam client...")
+	client.Close()
+	client = nil
+	log.Printf("Steam client disconnected successfully")
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Disconnected successfully",
+	})
 }
 
 func handleStatus(w http.ResponseWriter, r *http.Request) {
