@@ -18,15 +18,31 @@
             </div>
         </header>
 
+        <section id="conduct-scorecard-section" class="conduct-scorecard-banner hidden">
+            <div class="conduct-scorecard-banner-content">
+                <div id="conduct-scorecard-content" class="conduct-scorecard-content">
+                    <div class="loading">Loading conduct scorecard...</div>
+                </div>
+            </div>
+        </section>
+
         <main class="main-content">
             <aside class="sidebar">
-                <section id="profile-section" class="card">
+                <section id="config-section" class="card">
                     <div class="card-header">
-                        <h2>Steam Profiles</h2>
+                        <h2>Configuration</h2>
                     </div>
                     <div class="card-body">
-                         <div class="input-group">
-                            <label for="profile-select">Saved Profiles</label>
+                        <div class="input-group">
+                            <label for="replay-dir">Replay Directory</label>
+                            <input type="text" id="replay-dir" placeholder="/path/to/replays/">
+                        </div>
+                        <div class="input-group">
+                            <label for="steam-api-key">Steam API Key</label>
+                            <input type="password" id="steam-api-key" placeholder="Steam Web API Key">
+                        </div>
+                        <div class="input-group">
+                            <label for="profile-select">Steam Profiles</label>
                             <div class="row-group">
                                 <select id="profile-select" class="full-width">
                                     <option value="">Select a profile...</option>
@@ -41,55 +57,27 @@
                                 <button id="add-profile-btn" class="btn success-btn">Add</button>
                             </div>
                         </div>
-                         <div class="row-group" style="justify-content: flex-end;">
+                        <div class="row-group" style="justify-content: flex-end;">
                             <button id="delete-profile-btn" class="btn danger-btn small-btn" style="visibility: hidden;">Delete Selected</button>
                         </div>
-                    </div>
-                </section>
-
-                <section id="config-section" class="card">
-                    <div class="card-header">
-                        <h2>Configuration</h2>
-                    </div>
-                    <div class="card-body">
-                        <div class="input-group">
-                            <label for="replay-dir">Replay Directory</label>
-                            <input type="text" id="replay-dir" placeholder="/path/to/replays/">
+                        <div class="input-group" style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e0e0e0;">
+                            <label>Steam GC Login</label>
+                            <p class="status-text" id="steam-status" style="margin-bottom: 10px;">Status: Disconnected</p>
+                            <div class="input-group" style="margin-bottom: 10px;">
+                                <input type="text" id="steam-user" placeholder="Steam Username">
+                            </div>
+                            <div class="input-group" style="margin-bottom: 10px;">
+                                <input type="password" id="steam-pass" placeholder="Steam Password">
+                            </div>
+                            <div class="input-group hidden" id="steam-guard-group" style="margin-bottom: 10px;">
+                                <input type="text" id="steam-code" placeholder="Steam Guard Code">
+                            </div>
+                            <div style="display: flex; gap: 10px;">
+                                <button id="steam-login-btn" class="btn primary-btn">Connect to Steam</button>
+                                <button id="steam-disconnect-btn" class="btn" style="display: none; background-color: #f44336; color: white;">Disconnect</button>
+                            </div>
                         </div>
-                        <div class="input-group">
-                            <label for="stratz-api-token">Stratz API Token</label>
-                            <input type="password" id="stratz-api-token" placeholder="Your Stratz API token" autocomplete="off">
-                        </div>
-                        <div class="input-group">
-                            <label for="steam-api-key">Steam API Key</label>
-                            <input type="password" id="steam-api-key" placeholder="Your Steam API Key (Optional)" autocomplete="off">
-                        </div>
-                        <button id="save-config" class="btn secondary-btn">Save Settings</button>
-                    </div>
-                </section>
-
-                <section id="steam-login-section" class="card">
-                    <div class="card-header">
-                        <h2>Steam GC Login</h2>
-                    </div>
-                    <div class="card-body">
-                        <p class="status-text" id="steam-status">Status: Disconnected</p>
-                        <div class="input-group">
-                            <label for="steam-user">Username</label>
-                            <input type="text" id="steam-user" placeholder="Steam Username">
-                        </div>
-                        <div class="input-group">
-                            <label for="steam-pass">Password</label>
-                            <input type="password" id="steam-pass" placeholder="Steam Password">
-                        </div>
-                        <div class="input-group hidden" id="steam-guard-group">
-                            <label for="steam-code">Steam Guard Code</label>
-                            <input type="text" id="steam-code" placeholder="Email/App Code">
-                        </div>
-                        <div style="display: flex; gap: 10px;">
-                            <button id="steam-login-btn" class="btn primary-btn">Connect to Steam</button>
-                            <button id="steam-disconnect-btn" class="btn" style="display: none; background-color: #f44336; color: white;">Disconnect</button>
-                        </div>
+                        <button id="save-config" class="btn secondary-btn" style="margin-top: 20px;">Save Settings</button>
                     </div>
                 </section>
 
@@ -115,14 +103,38 @@
                                 Turbo games only
                             </label>
                         </div>
-                        <div class="input-group">
-                            <label>
-                                <input type="checkbox" id="history-use-gc">
-                                Use GC (for private profiles)
-                            </label>
-                        </div>
+                        <p class="status-text" style="color: #666; font-size: 0.9em; margin-top: 10px;">
+                            Steam connection required for match history
+                        </p>
                         <p id="download-status" class="download-status hidden"></p>
                         <div id="history-results" class="history-list custom-scrollbar"></div>
+                    </div>
+                </section>
+
+                <section id="fatal-search-section" class="card">
+                    <div class="card-header">
+                        <h2>Fatal Game Search</h2>
+                    </div>
+                    <div class="card-body">
+                        <div class="input-group">
+                            <label for="fatal-steam-id">Steam ID</label>
+                            <input type="number" id="fatal-steam-id" placeholder="Auto-filled from profile">
+                        </div>
+                        <div class="input-group">
+                            <label for="fatal-max-depth">Max Depth</label>
+                            <input type="number" id="fatal-max-depth" value="1" min="1" max="10">
+                            <small style="color: #666; display: block; margin-top: 5px;">Number of LowPriority sessions to search</small>
+                        </div>
+                        <div class="input-group">
+                            <label for="fatal-games-per">Games Per Fatal</label>
+                            <input type="number" id="fatal-games-per" value="2" min="1" max="15">
+                            <small style="color: #666; display: block; margin-top: 5px;">Number of games to download at each fatal game (includes fatal match + games before it)</small>
+                        </div>
+                        <button id="find-fatal-games" class="btn secondary-btn">Find Fatal Games</button>
+                        <p class="status-text" style="color: #666; font-size: 0.9em; margin-top: 10px;">
+                            Steam connection required
+                        </p>
+                        <div id="fatal-results" class="history-list custom-scrollbar" style="margin-top: 15px; max-height: 300px;"></div>
                     </div>
                 </section>
             </aside>
@@ -132,8 +144,8 @@
                     <div class="card-header">
                         <h2>Local Replays</h2>
                         <div class="header-controls">
+                            <button id="browse-back" class="btn text-btn" style="display: none;">← Back</button>
                             <button id="refresh-replays" class="btn icon-btn" title="Refresh">↻</button>
-                            <button id="sort-date" class="btn text-btn">Sort: Newest</button>
                         </div>
                     </div>
                     <div class="card-body">
@@ -213,6 +225,23 @@
                             <canvas id="timeline-graph"></canvas>
                         </div>
                         <div id="graphs-section" class="graphs-section hidden">
+                            <div id="report-summary" class="report-summary" style="display: none;">
+                                <h3>Report Summary</h3>
+                                <div class="summary-stats">
+                                    <div class="stat-item">
+                                        <span class="stat-label">Friendly Reports:</span>
+                                        <span class="stat-value" id="total-friendly-reports">0</span>
+                                    </div>
+                                    <div class="stat-item">
+                                        <span class="stat-label">Enemy Reports:</span>
+                                        <span class="stat-value" id="total-enemy-reports">0</span>
+                                    </div>
+                                    <div class="stat-item">
+                                        <span class="stat-label">Total Reports:</span>
+                                        <span class="stat-value" id="total-combined-reports">0</span>
+                                    </div>
+                                </div>
+                            </div>
                             <h3>Visualizations - Confirmed Reports</h3>
                             <div class="graphs-grid">
                                 <div class="graph-container">
@@ -257,6 +286,23 @@
                                     </div>
                                 </div>
                             </div>
+                            <div id="all-matches-report-summary" class="report-summary" style="display: none;">
+                                <h3>Report Summary (All Matches)</h3>
+                                <div class="summary-stats">
+                                    <div class="stat-item">
+                                        <span class="stat-label">Friendly Reports:</span>
+                                        <span class="stat-value" id="all-matches-friendly-reports">0</span>
+                                    </div>
+                                    <div class="stat-item">
+                                        <span class="stat-label">Enemy Reports:</span>
+                                        <span class="stat-value" id="all-matches-enemy-reports">0</span>
+                                    </div>
+                                    <div class="stat-item">
+                                        <span class="stat-label">Total Reports:</span>
+                                        <span class="stat-value" id="all-matches-combined-reports">0</span>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </section>
@@ -265,8 +311,8 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-    <script src="app.js?v=3"></script>
-    <script src="history.js?v=3"></script>
+    <script src="app.js?v=4"></script>
+    <script src="history.js?v=4"></script>
 </body>
 
 </html>

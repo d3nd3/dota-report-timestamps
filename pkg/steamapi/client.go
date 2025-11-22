@@ -22,6 +22,61 @@ func NewClient(apiKey string) *Client {
 	}
 }
 
+type MatchHistoryResponse struct {
+	Result struct {
+		Status           int     `json:"status"`
+		NumResults       int     `json:"num_results"`
+		TotalResults     int     `json:"total_results"`
+		ResultsRemaining int     `json:"results_remaining"`
+		Matches          []Match `json:"matches"`
+		Error            string  `json:"error"`
+	} `json:"result"`
+}
+
+type Match struct {
+	MatchID   int64 `json:"match_id"`
+	StartTime int64 `json:"start_time"`
+	LobbyType int   `json:"lobby_type"`
+	// Add other fields if needed
+}
+
+func (c *Client) GetPlayerMatchHistory(accountID int64, startAtMatchID int64, matchesRequested int) ([]Match, error) {
+	url := fmt.Sprintf("https://api.steampowered.com/IDOTA2Match_570/GetMatchHistory/v1/?key=%s&account_id=%d&matches_requested=%d", c.apiKey, accountID, matchesRequested)
+	if startAtMatchID > 0 {
+		url += fmt.Sprintf("&start_at_match_id=%d", startAtMatchID)
+	}
+
+	resp, err := c.httpClient.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch match history: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("invalid Steam API key")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status code from Steam API: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	var history MatchHistoryResponse
+	if err := json.Unmarshal(body, &history); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	if history.Result.Status != 1 {
+		return nil, fmt.Errorf("steam api returned status %d: %s", history.Result.Status, history.Result.Error)
+	}
+
+	return history.Result.Matches, nil
+}
+
 type MatchDetailsResponse struct {
 	Result struct {
 		Cluster    int   `json:"cluster"`
@@ -71,7 +126,7 @@ func (c *Client) GetReplayInfo(matchID int64) (clusterID int, replaySalt int64, 
 	if details.Result.MatchID == 0 {
 		return 0, 0, fmt.Errorf("match not found or details unavailable")
 	}
-	
+
 	// Some matches might not have replay salt (e.g. too old, or practice lobbies)
 	if details.Result.ReplaySalt == 0 {
 		return 0, 0, fmt.Errorf("replay salt not found in match details")
@@ -79,4 +134,3 @@ func (c *Client) GetReplayInfo(matchID int64) (clusterID int, replaySalt int64, 
 
 	return details.Result.Cluster, details.Result.ReplaySalt, nil
 }
-

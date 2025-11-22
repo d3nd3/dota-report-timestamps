@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/d3nd3/dota-report-timestamps/pkg/botclient"
@@ -22,6 +23,8 @@ type Config struct {
 
 var config Config
 var gcClient *botclient.Client
+var downloadLocks sync.Map // Map[int64]*sync.Mutex to prevent concurrent downloads of the same match
+var handlerLocks sync.Map // Map[int64]*sync.Mutex to prevent concurrent handler execution for the same match
 
 func noCacheJS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +74,7 @@ func main() {
 	// API endpoints
 	http.HandleFunc("/api/config", handleConfig)
 	http.HandleFunc("/api/replays", handleReplays)
+	http.HandleFunc("/api/browse", handleBrowse)
 	http.HandleFunc("/api/player-info", handlePlayerInfo)
 	http.HandleFunc("/api/parse", handleParse)
 	http.HandleFunc("/api/history", handleHistory)
@@ -78,11 +82,15 @@ func main() {
 	http.HandleFunc("/api/progress", handleProgress)
 	http.HandleFunc("/api/delete", handleDelete)
 	http.HandleFunc("/api/hero-icon/", handleHeroIcon)
+	http.HandleFunc("/api/fatal-search", handleFatalSearch)
 	
 	// Steam GC endpoints
 	http.HandleFunc("/api/steam/login", handleSteamLogin)
 	http.HandleFunc("/api/steam/disconnect", handleSteamDisconnect)
 	http.HandleFunc("/api/steam/status", handleSteamStatus)
+	http.HandleFunc("/api/steam/conduct-scorecard", handleConductScorecard)
+	http.HandleFunc("/api/steam/validate-report-card", handleValidateReportCard)
+	http.HandleFunc("/api/steam/validate-report-card-current", handleValidateReportCardCurrent)
 
 	fmt.Println("Server started at http://localhost:8081")
 	log.Fatal(http.ListenAndServe(":8081", nil))

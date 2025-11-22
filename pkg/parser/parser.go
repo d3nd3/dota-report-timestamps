@@ -607,7 +607,6 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 																	}
 
 																	minutes, secs := ticksToMinutesAndSeconds(begin_tick, pausedTicks, hoverTick)
-																	fmt.Printf("[PARSER] Creating confirmed report - reporter slot: %d, target slot: %d, target SteamID: %d, time: %02d:%02d\n", i, finalTargetSlot, targetSteamID, minutes, secs)
 
 																	var reportTeam string
 																	if team, okteam := e.GetUint64("m_iTeamNum"); okteam {
@@ -639,7 +638,6 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 																	delete(lastHoverTick, i)
 																	delete(lastHoverTarget, i)
 																	delete(firstHoverTarget, i)
-																	fmt.Printf("[PARSER] Report created and added - total reports: %d\n", len(reports))
 																}
 															}
 														}

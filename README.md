@@ -68,7 +68,12 @@ Before using the tool, you need to configure:
     - **Usage**: 
         - Use the "Steam GC Login" section in the web interface to log in.
         - Or set `STEAM_USER` and `STEAM_PASS` environment variables before running the server.
-    - Note: You may need to provide a Steam Guard code via the UI if prompted.
+    - **Authentication**:
+        - You will need to provide your Steam username, password, and a Steam Guard 2FA code each time you log in.
+        - The application does not use LoginKey tokens (Steam no longer provides them reliably).
+        - **Note**: Sentry file (machine authentication) is not currently being created, so you will need to provide 2FA on every login.
+        - **Important**: To prevent Steam rate limiting errors (E84/E87), avoid frequent reconnections. If you encounter rate limiting errors, wait at least 24 hours before attempting to log in again.
+        - **Connection Reuse**: The application keeps the Steam connection alive and reuses it when possible. Avoid manually disconnecting unless necessary, as reconnecting requires re-authentication with password + 2FA.
 
 ### Features
 
@@ -112,6 +117,7 @@ Before using the tool, you need to configure:
     -   Special hero assets (e.g., Wraith King Arcana) can alter the scoreboard layout.
 -   **Mouse Tracking**: The tool tracks the mouse cursor position of players when they have the scoreboard open to detect clicks on the report button area.
 -   **Replay Download**: The tool can automatically download replays from Valve's servers via Stratz API integration.
+-   **Replay Availability**: The time limit for downloading regular Dota 2 replays from the server is generally around 7 to 14 days (one to two weeks) after the match is played. Valve (Dota 2's developer) deletes older replays to manage storage, as millions of games are played every week. If a replay download fails with errors like "replay not found" or "404", the replay may have expired and is no longer available on Valve's servers.
 -   **Rate Limiting**: All OpenDota polling is throttled to ~30 requests per minute, and downloads are serialized to avoid hitting API limits.
 -   **Fallback Mechanism**: If Stratz fails to provide replay info, the tool attempts to use Steam WebAPI (if configured) and finally falls back to OpenDota parsing.
 -   **Replay Salt**: Valve's `IDOTA2Match_570/GetMatchDetails/v1` endpoint is broken for 7.36+ matches (500 or empty), so the only reliable salt sources are GC bots (e.g. go-dota2/node-dota2) or third parties like OpenDota/Stratz when they have processed the match.
@@ -131,11 +137,16 @@ Before using the tool, you need to configure:
 -   **Replay File Not Found**:
     -   Make sure the replay file exists in your configured replay directory
     -   Replay files must be downloaded from Dota 2 or via the Match History feature
-    -   Some older replays may no longer be available on Valve's servers
+    -   **Replay Expiration**: Dota 2 replays are only available for download for approximately 7-14 days after the match is played. Valve deletes older replays to manage storage. If you're trying to download a replay that's older than two weeks, it may no longer be available on Valve's servers.
 -   **Download Timeout**:
     -   Replay downloads can take several minutes, especially if the match needs to be parsed first via OpenDota
     -   The download will timeout after 10 minutes - check server logs for details
     -   Large replays or slow connections may require multiple attempts
+-   **Steam Rate Limiting Errors (E84/E87)**:
+    -   If you see error codes E84 (RateLimitExceeded) or E87 (AccountLoginDeniedThrottle), Steam has temporarily restricted your account due to too many login attempts
+    -   **Solution**: Wait at least 24 hours before attempting to log in again. Do not attempt multiple logins during this period as it will extend the cooldown
+    -   **Prevention**: Keep the Steam connection alive and avoid frequent disconnections/reconnections. Each reconnection requires password + 2FA authentication, which can trigger rate limits if done too frequently
+    -   If you hit rate limiting during initial setup/testing, wait the full 24 hours before trying again
 
 ### Server Logs
 

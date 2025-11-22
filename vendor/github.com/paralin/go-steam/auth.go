@@ -168,8 +168,10 @@ func (a *Auth) handleLoggedOff(packet *Packet) {
 func (a *Auth) handleUpdateMachineAuth(packet *Packet) {
 	body := new(CMsgClientUpdateMachineAuth)
 	packet.ReadProtoMsg(body)
+	
+	// Fix: Hash the file content (body.Bytes), not the packet data
 	hash := sha1.New()
-	hash.Write(packet.Data)
+	hash.Write(body.GetBytes())
 	sha := hash.Sum(nil)
 
 	msg := NewClientMsgProtobuf(EMsg_ClientUpdateMachineAuthResponse, &CMsgClientUpdateMachineAuthResponse{
@@ -178,7 +180,10 @@ func (a *Auth) handleUpdateMachineAuth(packet *Packet) {
 	msg.SetTargetJobId(packet.SourceJobId)
 	a.client.Write(msg)
 
-	a.client.Emit(&MachineAuthUpdateEvent{sha})
+	a.client.Emit(&MachineAuthUpdateEvent{
+		Hash:  sha,
+		Bytes: body.GetBytes(),
+	})
 }
 
 func (a *Auth) handleAccountInfo(packet *Packet) {

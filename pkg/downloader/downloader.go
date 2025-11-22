@@ -140,21 +140,76 @@ func min(a, b int) int {
 	return b
 }
 
+// extractClusterSaltFromURL attempts to extract cluster and salt from a Valve replay URL.
+// Format: http://replay{cluster}.{domain}/570/{matchID}_{salt}.dem.bz2
+// Returns cluster, salt, and true if successful, or 0, 0, false if parsing fails.
+func extractClusterSaltFromURL(url string, matchID int64) (uint32, uint64, bool) {
+	// Try to match: http://replay{cluster}.{domain}/570/{matchID}_{salt}.dem.bz2
+	var cluster uint32
+	var salt uint64
+	// Look for /570/{matchID}_{salt}.dem.bz2 pattern
+	prefix := fmt.Sprintf("/570/%d_", matchID)
+	idx := strings.Index(url, prefix)
+	if idx == -1 {
+		return 0, 0, false
+	}
+	// Extract salt after matchID_
+	saltPart := url[idx+len(prefix):]
+	saltEnd := strings.Index(saltPart, ".dem.bz2")
+	if saltEnd == -1 {
+		return 0, 0, false
+	}
+	if _, err := fmt.Sscanf(saltPart[:saltEnd], "%d", &salt); err != nil {
+		return 0, 0, false
+	}
+	// Extract cluster from replay{cluster}.
+	replayIdx := strings.Index(url, "replay")
+	if replayIdx == -1 {
+		return 0, 0, false
+	}
+	clusterPart := url[replayIdx+6:] // Skip "replay"
+	dotIdx := strings.Index(clusterPart, ".")
+	if dotIdx == -1 {
+		return 0, 0, false
+	}
+	if _, err := fmt.Sscanf(clusterPart[:dotIdx], "%d", &cluster); err != nil {
+		return 0, 0, false
+	}
+	return cluster, salt, true
+}
+
 // constructReplayURLs generates primary and alternative replay URLs for a given match.
-// Valve has multiple replay clusters.
+// Valve has multiple replay clusters and CDN domains.
 // Primary format: http://replay{cluster}.valve.net/570/{matchID}_{salt}.dem.bz2
 // Perfect World (China) format: http://replay{cluster}.wmsj.cn/570/{matchID}_{salt}.dem.bz2
+// Additional CDN alternatives for better reliability
+// Note: Neither Stratz nor OpenDota host replays - they only provide cluster/salt info
+// to construct Valve CDN URLs. All replays must be downloaded from Valve's CDNs.
 func constructReplayURLs(cluster uint32, matchID int64, salt uint64) []string {
-	// Primary URL (Valve global)
-	urls := []string{
-		fmt.Sprintf("http://replay%d.valve.net/570/%d_%d.dem.bz2", cluster, matchID, salt),
+	urls := []string{}
+	
+	// Primary Valve CDN domains (try multiple patterns)
+	valveDomains := []string{
+		"valve.net",
+		"valvesoftware.com",
 	}
-
-	// If the cluster is in China (typically > 200, but can vary), Perfect World servers might be more reliable.
-	// We'll add it as a fallback for all clusters just in case, or specifically if we suspect it's a PW match.
-	// Note: Perfect World domains sometimes change, but wmsj.cn is the standard one.
-	urls = append(urls, fmt.Sprintf("http://replay%d.wmsj.cn/570/%d_%d.dem.bz2", cluster, matchID, salt))
-
+	
+	// Perfect World China CDN domains
+	pwDomains := []string{
+		"wmsj.cn",
+		"pwrd.com",
+	}
+	
+	// Try primary Valve domains first
+	for _, domain := range valveDomains {
+		urls = append(urls, fmt.Sprintf("http://replay%d.%s/570/%d_%d.dem.bz2", cluster, domain, matchID, salt))
+	}
+	
+	// Try Perfect World domains (especially useful for China region clusters)
+	for _, domain := range pwDomains {
+		urls = append(urls, fmt.Sprintf("http://replay%d.%s/570/%d_%d.dem.bz2", cluster, domain, matchID, salt))
+	}
+	
 	return urls
 }
 
@@ -203,18 +258,15 @@ func DownloadReplay(matchID int64, replayDir string, stratzToken string, steamAP
 	}
 
 	// 2. Try Stratz if Steam failed or no key
+	// Note: Stratz does not host replays - it only provides cluster/salt to construct Valve CDN URLs
 	if len(replayURLs) == 0 && stratzToken != "" {
-		log.Printf("Attempting to get replay URL from Stratz for match %d...", matchID)
-		stratzURL, err := getReplayURLFromStratz(matchID, stratzToken)
+		log.Printf("Attempting to get replay URLs from Stratz for match %d...", matchID)
+		stratzURLs, err := getReplayURLsFromStratz(matchID, stratzToken)
 		if err != nil {
-			log.Printf("Failed to get replay URL from Stratz: %v. Falling back to OpenDota.", err)
-		} else if stratzURL != "" {
-			// Stratz returns a full URL, so we accept it as is.
-			// However, Stratz might construct it themselves.
-			// Ideally we want cluster/salt to construct fallbacks, but Stratz client just gives URL here.
-			// We'll just use the URL provided.
-			replayURLs = []string{stratzURL}
-			log.Printf("Found replay URL via Stratz: %s", stratzURL)
+			log.Printf("Failed to get replay URLs from Stratz: %v. Falling back to OpenDota.", err)
+		} else if len(stratzURLs) > 0 {
+			replayURLs = stratzURLs
+			log.Printf("Found %d replay URLs via Stratz (cluster/salt): %s (and %d alternates)", len(stratzURLs), stratzURLs[0], len(stratzURLs)-1)
 		}
 	}
 
@@ -285,6 +337,7 @@ func DownloadReplay(matchID int64, replayDir string, stratzToken string, steamAP
 		}
 
 		// Now fetch the replay URL (should be available if parsed)
+		// Note: OpenDota does not host replays - it only provides Valve CDN URLs
 		odURL, err := getReplayURL(matchID)
 		if err != nil {
 			// If OpenDota is down (521) or having server issues (5xx), queue for retry
@@ -308,32 +361,44 @@ func DownloadReplay(matchID int64, replayDir string, stratzToken string, steamAP
 		if odURL == "" {
 			return fmt.Errorf("replay URL is missing for match %d (may have expired)", matchID)
 		}
-		replayURLs = []string{odURL}
+		
+		// Try to extract cluster/salt from OpenDota's URL to generate alternative CDN URLs
+		if cluster, salt, ok := extractClusterSaltFromURL(odURL, matchID); ok {
+			log.Printf("Extracted cluster=%d, salt=%d from OpenDota URL, generating CDN alternatives", cluster, salt)
+			replayURLs = constructReplayURLs(cluster, matchID, salt)
+		} else {
+			// Fallback: use OpenDota's URL as-is (it's still a Valve CDN URL)
+			log.Printf("Could not extract cluster/salt from OpenDota URL, using URL as-is: %s", odURL)
+			replayURLs = []string{odURL}
+		}
 	}
 
 	return downloadAndExtractReplay(replayURLs, matchID, replayDir)
 }
 
-func getReplayURLFromStratz(matchID int64, token string) (string, error) {
+// getReplayURLsFromStratz gets cluster/salt from Stratz and constructs all CDN alternative URLs.
+// Note: Stratz does not host replays - it only provides cluster/salt to construct Valve CDN URLs.
+func getReplayURLsFromStratz(matchID int64, token string) ([]string, error) {
 	client := stratz.NewClient(token)
 	info, err := client.GetReplayInfo(matchID)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	if info.ClusterID == 0 || info.ReplaySalt == 0 {
 		// Log more details about why we're missing this data
 		if info.ClusterID == 0 && info.ReplaySalt == 0 {
-			return "", fmt.Errorf("missing cluster or salt info from Stratz (match %d may not have replay data available yet)", matchID)
+			return nil, fmt.Errorf("missing cluster or salt info from Stratz (match %d may not have replay data available yet)", matchID)
 		} else if info.ClusterID == 0 {
-			return "", fmt.Errorf("missing cluster ID from Stratz for match %d (replaySalt: %d)", matchID, info.ReplaySalt)
+			return nil, fmt.Errorf("missing cluster ID from Stratz for match %d (replaySalt: %d)", matchID, info.ReplaySalt)
 		} else {
-			return "", fmt.Errorf("missing replay salt from Stratz for match %d (clusterID: %d)", matchID, info.ClusterID)
+			return nil, fmt.Errorf("missing replay salt from Stratz for match %d (clusterID: %d)", matchID, info.ClusterID)
 		}
 	}
 
-	url := fmt.Sprintf("http://replay%d.valve.net/570/%d_%d.dem.bz2", info.ClusterID, matchID, info.ReplaySalt)
-	return url, nil
+	// Use constructReplayURLs to generate all CDN alternatives
+	urls := constructReplayURLs(uint32(info.ClusterID), matchID, uint64(info.ReplaySalt))
+	return urls, nil
 }
 
 func RequestParsing(matchID int64) (int, error) {
@@ -602,20 +667,41 @@ func downloadAndExtractReplay(replayURLs []string, matchID int64, replayDir stri
 	err := func() error {
 		// Try each URL in the list
 		var lastErr error
+		notFoundCount := 0 // Track 404s to fail fast if all URLs return 404
+		
 		for _, url := range replayURLs {
 			log.Printf("Downloading replay from: %s", url)
 
-			// Retry loop for 502/503 errors (max 3 retries per URL)
-			for i := 0; i < 3; i++ {
-				if i > 0 {
-					time.Sleep(2 * time.Second) // Backoff slightly
+			// Determine max retries based on error type
+			maxRetries := 3 // Default for transient errors
+			retryCount := 0
+			
+			for retryCount < maxRetries {
+				if retryCount > 0 {
+					backoff := time.Duration(retryCount) * 2 * time.Second
+					time.Sleep(backoff)
 				}
 
 				getResp, reqErr := downloadClient.Get(url)
 				if reqErr != nil {
 					lastErr = reqErr
+					errStr := reqErr.Error()
+					
+					// DNS lookup failures are usually permanent - fail after 1 retry
+					if strings.Contains(errStr, "no such host") || strings.Contains(errStr, "lookup") {
+						log.Printf("DNS error downloading %s: %v", url, reqErr)
+						if retryCount >= 1 {
+							log.Printf("DNS lookup failed after retry, skipping this URL")
+							break // Try next URL
+						}
+						retryCount++
+						continue
+					}
+					
+					// Other network errors - retry a few times
 					log.Printf("Network error downloading %s: %v", url, reqErr)
-					continue // Network error, retry
+					retryCount++
+					continue
 				}
 
 				if getResp.StatusCode == http.StatusOK {
@@ -639,13 +725,6 @@ func downloadAndExtractReplay(replayURLs []string, matchID int64, replayDir stri
 						MatchID: matchID,
 					}
 
-					// Use TeeReader to write to file and update progress
-					// Note: io.Copy uses the writer (bz2File) to write, but we need to intercept reads.
-					// Actually, we can wrap the reader.
-					// But wait, ProgressWriter implements Write, so we can use io.TeeReader(body, progressWriter)
-					// No, io.TeeReader returns a Reader. We need to Copy from (TeeReader(body, progressWriter)) to file.
-					// Wait, ProgressWriter is a Writer. So TeeReader(body, progressWriter) returns a reader that writes to progressWriter as it reads.
-
 					reader := io.TeeReader(getResp.Body, progressWriter)
 
 					if _, err := io.Copy(bz2File, reader); err != nil {
@@ -657,20 +736,39 @@ func downloadAndExtractReplay(replayURLs []string, matchID int64, replayDir stri
 					return nil
 				}
 
-				// If it's a temporary server error (502, 503, 504), retry
+				// 404 = Replay expired/not found - fail immediately, no retries
+				if getResp.StatusCode == http.StatusNotFound {
+					getResp.Body.Close()
+					notFoundCount++
+					lastErr = fmt.Errorf("replay not found (404) - may have expired")
+					log.Printf("Replay not found (404) for %s - replay may have expired (7-14 day limit)", url)
+					// If multiple URLs all return 404, fail fast
+					if notFoundCount >= 2 {
+						return fmt.Errorf("replay not found on multiple CDNs (404) - replay has likely expired (7-14 day limit): %w", lastErr)
+					}
+					break // Try next URL immediately
+				}
+
+				// Temporary server errors (502, 503, 504) - retry a few times
 				if getResp.StatusCode == http.StatusBadGateway || getResp.StatusCode == http.StatusServiceUnavailable || getResp.StatusCode == http.StatusGatewayTimeout {
 					getResp.Body.Close()
 					lastErr = fmt.Errorf("download failed with status: %s", getResp.Status)
-					log.Printf("Server error downloading %s: %s", url, getResp.Status)
+					log.Printf("Server error downloading %s: %s (retry %d/%d)", url, getResp.Status, retryCount+1, maxRetries)
+					retryCount++
 					continue
 				}
 
-				// Permanent error (404, etc), try next URL immediately
+				// Other permanent errors (403, 500, etc) - try next URL immediately
 				getResp.Body.Close()
 				lastErr = fmt.Errorf("download failed with status: %s", getResp.Status)
 				log.Printf("Permanent error downloading %s: %s", url, getResp.Status)
 				break
 			}
+		}
+
+		// If we got 404 from at least one URL, provide helpful error message
+		if notFoundCount > 0 {
+			return fmt.Errorf("replay not found (404) - replay has likely expired (7-14 day limit): %w", lastErr)
 		}
 
 		return fmt.Errorf("failed to download replay after trying all URLs: %w", lastErr)

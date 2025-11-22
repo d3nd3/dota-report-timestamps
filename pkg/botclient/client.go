@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 )
 
@@ -15,6 +16,7 @@ const (
 	StatusNeedGuardCode
 	StatusConnected
 	StatusGCReady
+	StatusRateLimited
 )
 
 type Client struct {
@@ -52,6 +54,10 @@ func (c *Client) SubmitCode(code string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return fmt.Errorf("submit code failed: %s", string(body))
+	}
 	return nil
 }
 
@@ -73,14 +79,32 @@ func (c *Client) GetStatus() ConnectionStatus {
 		return StatusDisconnected
 	}
 	defer resp.Body.Close()
-	
+
 	var res struct {
-		Status int `json:"status"`
+		Status       int    `json:"status"`
+		ErrorMessage string `json:"errorMessage,omitempty"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
 		return StatusDisconnected
 	}
 	return ConnectionStatus(res.Status)
+}
+
+func (c *Client) GetStatusWithError() (ConnectionStatus, string) {
+	resp, err := http.Get(c.baseURL + "/status")
+	if err != nil {
+		return StatusDisconnected, ""
+	}
+	defer resp.Body.Close()
+
+	var res struct {
+		Status       int    `json:"status"`
+		ErrorMessage string `json:"errorMessage,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return StatusDisconnected, ""
+	}
+	return ConnectionStatus(res.Status), res.ErrorMessage
 }
 
 func (c *Client) GetReplayInfo(matchID uint64) (uint32, uint64, error) {
@@ -106,14 +130,24 @@ func (c *Client) GetReplayInfo(matchID uint64) (uint32, uint64, error) {
 }
 
 type Match struct {
-	ID int64 `json:"id"`
+	ID        int64  `json:"id"`
+	GameMode  uint32 `json:"gameMode"`
+	LobbyType uint32 `json:"lobbyType"`
+	StartTime uint32 `json:"startTime"`
 }
 
 func (c *Client) GetPlayerMatchHistory(steamID64 int64, limit int, turboOnly bool) ([]Match, error) {
+	return c.GetPlayerMatchHistoryPaginated(steamID64, limit, turboOnly, 0)
+}
+
+func (c *Client) GetPlayerMatchHistoryPaginated(steamID64 int64, limit int, turboOnly bool, startAtMatchID uint64) ([]Match, error) {
 	payload := map[string]interface{}{
 		"steamId64": steamID64,
 		"limit":     limit,
 		"turboOnly": turboOnly,
+	}
+	if startAtMatchID > 0 {
+		payload["startAtMatchId"] = startAtMatchID
 	}
 	data, _ := json.Marshal(payload)
 	resp, err := http.Post(c.baseURL+"/player-match-history", "application/json", bytes.NewBuffer(data))
@@ -140,3 +174,65 @@ func (c *Client) GetPlayerMatchHistory(steamID64 int64, limit int, turboOnly boo
 	return matches, nil
 }
 
+type FatalMatchInfo struct {
+	FatalMatchID       int64   `json:"fatalMatchId"`
+	SingleDraftMatchID int64   `json:"singleDraftMatchId"`
+	SingleDraftDate    uint32  `json:"singleDraftDate"`
+	AdditionalMatchIDs []int64 `json:"additionalMatchIds"`
+}
+
+func (c *Client) FindFatalGames(steamID64 int64, maxDepth int, gamesPerFatal int) ([]FatalMatchInfo, error) {
+	payload := map[string]interface{}{
+		"steamId64":     steamID64,
+		"maxDepth":      maxDepth,
+		"gamesPerFatal": gamesPerFatal,
+	}
+	data, _ := json.Marshal(payload)
+	resp, err := http.Post(c.baseURL+"/fatal-search", "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		if errResp.Error != "" {
+			return nil, fmt.Errorf(errResp.Error)
+		}
+		return nil, fmt.Errorf("request failed with status %d", resp.StatusCode)
+	}
+
+	var matches []FatalMatchInfo
+	if err := json.NewDecoder(resp.Body).Decode(&matches); err != nil {
+		return nil, err
+	}
+	return matches, nil
+}
+
+func (c *Client) GetPlayerConductScorecard() (map[string]interface{}, error) {
+	resp, err := http.Get(c.baseURL + "/conduct-scorecard")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		if errResp.Error != "" {
+			return nil, fmt.Errorf(errResp.Error)
+		}
+		return nil, fmt.Errorf("request failed with status %d", resp.StatusCode)
+	}
+
+	var scorecard map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&scorecard); err != nil {
+		return nil, err
+	}
+	return scorecard, nil
+}

@@ -206,10 +206,54 @@ const DOTA_HEROES = [
     return `/api/hero-icon/${heroId}`;
 }
 
+// Retry utility with exponential backoff
+async function fetchWithRetry(url, options = {}, maxRetries = 3, baseDelay = 1000) {
+    let lastError;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30000);
+            const response = await fetch(url, {
+                ...options,
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            
+            if (!response.ok) {
+                const errorText = await response.text().catch(() => '');
+                if (response.status >= 500 && attempt < maxRetries) {
+                    throw new Error(`Server error (${response.status}): ${errorText || response.statusText}`);
+                }
+                throw new Error(errorText || `HTTP ${response.status}: ${response.statusText}`);
+            }
+            
+            return response;
+        } catch (error) {
+            lastError = error;
+            if (attempt < maxRetries) {
+                const isConnectionError = error.name === 'AbortError' || 
+                                        error.message.includes('Failed to fetch') ||
+                                        error.message.includes('NetworkError') ||
+                                        error.message.includes('timeout');
+                
+                if (isConnectionError || (error.message && error.message.includes('500'))) {
+                    const delay = baseDelay * Math.pow(2, attempt);
+                    console.log(`Request failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms...`, error.message);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    continue;
+                }
+            }
+            throw error;
+        }
+    }
+    throw lastError;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+    let currentPath = '';
+    let currentReplays = [];
+    
     const replayDirInput = document.getElementById('replay-dir');
-    const stratzApiTokenInput = document.getElementById('stratz-api-token');
-    const steamApiKeyInput = document.getElementById('steam-api-key');
     const saveConfigBtn = document.getElementById('save-config');
     const replayList = document.getElementById('replay-list');
     const refreshReplaysBtn = document.getElementById('refresh-replays');
@@ -337,8 +381,8 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderProfileSelect(shouldLoadReplays) {
-        const currentVal = profileSelect.value;
-        const hadValue = currentVal !== "" && profiles[currentVal];
+        const savedIndex = localStorage.getItem('selectedProfileIndex');
+        const currentVal = savedIndex !== null && profiles[savedIndex] ? savedIndex : profileSelect.value;
         
         profileSelect.innerHTML = '<option value="">Select a profile...</option>';
         profiles.forEach((p, index) => {
@@ -350,13 +394,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (currentVal && profiles[currentVal]) {
             profileSelect.value = currentVal;
+            localStorage.setItem('selectedProfileIndex', currentVal);
             deleteProfileBtn.style.visibility = 'visible';
             if (shouldLoadReplays) {
                 const profileName = profiles[currentVal].name;
-                loadReplays(profileName);
+                browseDirectory('', profileName);
             }
         } else {
-             deleteProfileBtn.style.visibility = 'hidden';
+            profileSelect.value = "";
+            localStorage.removeItem('selectedProfileIndex');
+            deleteProfileBtn.style.visibility = 'hidden';
         }
     }
 
@@ -403,6 +450,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (index !== "" && profiles[index]) {
             const p = profiles[index];
             profileName = p.name;
+            localStorage.setItem('selectedProfileIndex', index);
             console.log('Selected profile:', profileName);
             if (historySteamIdInput) {
                 historySteamIdInput.value = p.id;
@@ -415,13 +463,22 @@ document.addEventListener('DOMContentLoaded', () => {
                     syncSteamIdSlotId();
                 }
             }
+            const fatalSteamIdInput = document.getElementById('fatal-steam-id');
+            if (fatalSteamIdInput) {
+                fatalSteamIdInput.value = p.id;
+            }
             deleteProfileBtn.style.visibility = 'visible';
         } else {
             console.log('No profile selected');
+            localStorage.removeItem('selectedProfileIndex');
             deleteProfileBtn.style.visibility = 'hidden';
+            const fatalSteamIdInput = document.getElementById('fatal-steam-id');
+            if (fatalSteamIdInput) {
+                fatalSteamIdInput.value = '';
+            }
         }
-        console.log('Calling loadReplays with profileName:', profileName);
-        loadReplays(profileName);
+        console.log('Calling browseDirectory with profileName:', profileName);
+        browseDirectory('', profileName);
     });
 
     function getSelectedProfileName() {
@@ -446,6 +503,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Steam Login Elements
     const steamUserInput = document.getElementById('steam-user');
     const steamPassInput = document.getElementById('steam-pass');
+    const steamApiKeyInput = document.getElementById('steam-api-key');
     const steamCodeInput = document.getElementById('steam-code');
     const steamGuardGroup = document.getElementById('steam-guard-group');
     const steamLoginBtn = document.getElementById('steam-login-btn');
@@ -454,52 +512,435 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Steam Logic
     let steamPollingInterval;
+    let connectingTimeoutId = null;
+    let submittingTimeoutId = null;
 
-    function updateSteamUI(status, text) {
-        steamStatusText.textContent = `Status: ${text}`;
-        // StatusNeedGuardCode = 2
-        if (status === 2) {
-            steamStatusText.style.color = '#ff9800';
-            steamGuardGroup.classList.remove('hidden');
-            steamLoginBtn.textContent = 'Submit Code';
-            steamLoginBtn.disabled = false;
-            steamDisconnectBtn.style.display = 'none';
+    let lastSteamStatus = null;
+    let lastSteamStatusText = null;
+    
+    function updateSteamUI(status, text, errorMessage) {
+        const statusText = `Status: ${text}`;
+        if (steamStatusText.textContent !== statusText) {
+            steamStatusText.textContent = statusText;
+        }
+        
+        // Display error message if present
+        let errorDisplay = document.getElementById('steam-error-message');
+        if (errorMessage && errorMessage.trim() !== '') {
+            if (!errorDisplay) {
+                errorDisplay = document.createElement('p');
+                errorDisplay.id = 'steam-error-message';
+                errorDisplay.style.color = '#ef4444';
+                errorDisplay.style.marginTop = '8px';
+                errorDisplay.style.marginBottom = '8px';
+                errorDisplay.style.fontSize = '0.9em';
+                steamStatusText.parentNode.insertBefore(errorDisplay, steamStatusText.nextSibling);
+            }
+            errorDisplay.textContent = errorMessage;
+            errorDisplay.style.display = 'block';
+        } else if (errorDisplay) {
+            errorDisplay.style.display = 'none';
+        }
+        
+        if (connectingTimeoutId) {
+            clearTimeout(connectingTimeoutId);
+            connectingTimeoutId = null;
+        }
+        if (submittingTimeoutId) {
+            clearTimeout(submittingTimeoutId);
+            submittingTimeoutId = null;
+        }
+        
+        if (status === 1) {
+            if (lastSteamStatus !== 1) {
+                steamStatusText.style.color = '#ff9800';
+                steamGuardGroup.classList.add('hidden');
+                steamLoginBtn.textContent = 'Connecting...';
+                steamLoginBtn.disabled = true;
+                steamDisconnectBtn.style.display = 'none';
+                lastSteamStatus = 1;
+            }
             if (steamPollingInterval) clearInterval(steamPollingInterval);
             steamPollingInterval = setInterval(pollSteamStatus, 2000);
-        } else if (status === 3 || status === 4) { // StatusConnected = 3, GCReady = 4
-             steamStatusText.style.color = '#4caf50';
-             steamLoginBtn.textContent = status === 4 ? 'Connected' : 'Connecting...';
-             steamLoginBtn.disabled = true;
-             steamGuardGroup.classList.add('hidden');
-             steamDisconnectBtn.style.display = 'inline-block';
+            
+            connectingTimeoutId = setTimeout(() => {
+                if (steamLoginBtn.disabled && steamLoginBtn.textContent === 'Connecting...') {
+                    console.warn('Connection timeout - re-enabling button as fallback');
+                    steamLoginBtn.disabled = false;
+                    steamLoginBtn.textContent = 'Connect to Steam';
+                    steamStatusText.textContent = 'Status: Disconnected (timeout)';
+                    steamStatusText.style.color = '';
+                }
+            }, 20000);
+        } else if (status === 2) {
+            if (lastSteamStatus !== 2) {
+                steamStatusText.style.color = '#ff9800';
+                steamGuardGroup.classList.remove('hidden');
+                if (steamLoginBtn.textContent === 'Submitting Code...') {
+                    submittingTimeoutId = setTimeout(() => {
+                        if (steamLoginBtn.disabled && steamLoginBtn.textContent === 'Submitting Code...') {
+                            console.warn('Submit code timeout - re-enabling button as fallback');
+                            steamLoginBtn.disabled = false;
+                            steamLoginBtn.textContent = 'Submit Code';
+                        }
+                    }, 15000);
+                } else {
+                    steamLoginBtn.textContent = 'Submit Code';
+                    steamLoginBtn.disabled = false;
+                }
+                steamDisconnectBtn.style.display = 'none';
+                lastSteamStatus = 2;
+            }
+            if (steamPollingInterval) clearInterval(steamPollingInterval);
+            steamPollingInterval = setInterval(pollSteamStatus, 2000);
+        } else if (status === 3 || status === 4) {
+             if (lastSteamStatus !== status) {
+                 steamStatusText.style.color = '#4caf50';
+                 steamLoginBtn.textContent = status === 4 ? 'Connected' : 'Connecting...';
+                 steamLoginBtn.disabled = true;
+                 steamGuardGroup.classList.add('hidden');
+                 steamDisconnectBtn.style.display = 'inline-block';
+                 lastSteamStatus = status;
+                 if (status === 4) {
+                     fetchConductScorecard();
+                 }
+             }
              if (steamPollingInterval) clearInterval(steamPollingInterval);
              steamPollingInterval = setInterval(pollSteamStatus, 10000);
+        } else if (status === 5) { // Rate Limited
+             if (lastSteamStatus !== 5) {
+                 steamStatusText.style.color = '#f44336';
+                 steamStatusText.textContent = 'Status: Rate Limited (Wait 24h)';
+                 steamLoginBtn.textContent = 'Rate Limited';
+                 steamLoginBtn.disabled = true;
+                 steamGuardGroup.classList.add('hidden');
+                 steamDisconnectBtn.style.display = 'inline-block';
+                 lastSteamStatus = 5;
+             }
+             if (steamPollingInterval) clearInterval(steamPollingInterval);
+             steamPollingInterval = setInterval(pollSteamStatus, 60000);
         } else {
-            steamStatusText.style.color = '';
-            steamGuardGroup.classList.add('hidden');
-            steamCodeInput.value = '';
-            steamLoginBtn.textContent = 'Connect to Steam';
-            steamLoginBtn.disabled = false;
-            steamDisconnectBtn.style.display = 'none';
+            if (lastSteamStatus !== status) {
+                steamStatusText.style.color = '';
+                steamGuardGroup.classList.add('hidden');
+                steamCodeInput.value = '';
+                steamLoginBtn.textContent = 'Connect to Steam';
+                steamLoginBtn.disabled = false;
+                steamDisconnectBtn.style.display = 'none';
+                document.getElementById('conduct-scorecard-section').classList.add('hidden');
+                lastSteamStatus = status;
+            }
             if (steamPollingInterval) clearInterval(steamPollingInterval);
             steamPollingInterval = setInterval(pollSteamStatus, 2000);
         }
     }
 
+    let lastConductScorecardData = null;
+    let isFetchingConductScorecard = false;
+    
+    function fetchConductScorecard() {
+        const scorecardSection = document.getElementById('conduct-scorecard-section');
+        const scorecardContent = document.getElementById('conduct-scorecard-content');
+        
+        if (!scorecardSection || !scorecardContent) return;
+        if (isFetchingConductScorecard) return;
+        
+        isFetchingConductScorecard = true;
+        const wasHidden = scorecardSection.classList.contains('hidden');
+        if (wasHidden) {
+            scorecardSection.classList.remove('hidden');
+        }
+        if (!scorecardContent.querySelector('.conduct-scorecard-grid')) {
+            scorecardContent.innerHTML = '<div class="loading">Loading conduct scorecard...</div>';
+        }
+        
+        fetchWithRetry('/api/steam/conduct-scorecard', {}, 2, 500)
+            .then(res => {
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+                }
+                return res.json();
+            })
+            .then(data => {
+                const dataKey = JSON.stringify(data);
+                if (dataKey !== lastConductScorecardData) {
+                    displayConductScorecard(data);
+                    lastConductScorecardData = dataKey;
+                }
+                isFetchingConductScorecard = false;
+            })
+            .catch(err => {
+                console.error('Error fetching conduct scorecard:', err);
+                if (!scorecardContent.querySelector('.conduct-scorecard-grid')) {
+                    scorecardContent.innerHTML = `<div style="color: var(--danger-color);">Error loading conduct scorecard: ${err.message}</div>`;
+                }
+                isFetchingConductScorecard = false;
+            });
+    }
+
+    function displayConductScorecard(data) {
+        const scorecardContent = document.getElementById('conduct-scorecard-content');
+        if (!scorecardContent) return;
+        
+        const formatDate = (timestamp) => {
+            if (!timestamp || timestamp === 0) return 'N/A';
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleString('en-US', {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit'
+            });
+        };
+        
+        const rawBehaviorScore = data.raw_behavior_score || 0;
+        const oldRawBehaviorScore = data.old_raw_behavior_score || 0;
+        const behaviorScoreChange = rawBehaviorScore - oldRawBehaviorScore;
+        const behaviorScoreChangeClass = behaviorScoreChange >= 0 ? 'positive' : 'negative';
+        const behaviorScoreChangeSymbol = behaviorScoreChange >= 0 ? '↑' : '↓';
+        
+        let html = '<div class="conduct-scorecard-grid">';
+        
+        html += `
+            <div class="conduct-stat-card">
+                <div class="conduct-stat-label">Raw Behavior Score</div>
+                <div class="conduct-stat-value">${rawBehaviorScore.toLocaleString()}</div>
+                ${oldRawBehaviorScore > 0 ? `
+                    <div class="conduct-stat-change ${behaviorScoreChangeClass}">
+                        ${behaviorScoreChangeSymbol} ${Math.abs(behaviorScoreChange).toLocaleString()} 
+                        (was ${oldRawBehaviorScore.toLocaleString()})
+                    </div>
+                ` : ''}
+            </div>
+        `;
+        
+        html += `
+            <div class="conduct-stat-card">
+                <div class="conduct-stat-label">Commend Count</div>
+                <div class="conduct-stat-value">${data.commend_count || 0}</div>
+            </div>
+        `;
+        
+        html += `
+            <div class="conduct-stat-card">
+                <div class="conduct-stat-label">Matches in Report</div>
+                <div class="conduct-stat-value">${data.matches_in_report || 0}</div>
+                <div class="conduct-date-display">15-game period</div>
+            </div>
+        `;
+        
+        html += `
+            <div class="conduct-stat-card">
+                <div class="conduct-stat-label">Matches Clean</div>
+                <div class="conduct-stat-value">${data.matches_clean || 0}</div>
+            </div>
+        `;
+        
+        html += `
+            <div class="conduct-stat-card">
+                <div class="conduct-stat-label">Matches Reported</div>
+                <div class="conduct-stat-value" style="color: ${(data.matches_reported || 0) > 0 ? 'var(--warning-color)' : 'var(--text-primary)'}">${data.matches_reported || 0}</div>
+            </div>
+        `;
+        
+        html += `
+            <div class="conduct-stat-card">
+                <div class="conduct-stat-label">Matches Abandoned</div>
+                <div class="conduct-stat-value" style="color: ${(data.matches_abandoned || 0) > 0 ? 'var(--danger-color)' : 'var(--text-primary)'}">${data.matches_abandoned || 0}</div>
+            </div>
+        `;
+        
+        html += `
+            <div class="conduct-stat-card">
+                <div class="conduct-stat-label">Match Date of Last Chunk</div>
+                <div class="conduct-stat-value" style="font-size: 1rem;">${formatDate(data.date)}</div>
+            </div>
+        `;
+        
+        html += `
+            <div class="conduct-stat-card">
+                <div class="conduct-stat-label">Match ID</div>
+                <div class="conduct-match-id">${data.match_id || 'N/A'}</div>
+            </div>
+        `;
+        
+        html += '</div>';
+        
+        const reasons = data.reasons || 0;
+        const reasonNames = [];
+        if (reasons & 1) reasonNames.push('Cheating');
+        if (reasons & 2) reasonNames.push('Feeding');
+        if (reasons & 4) reasonNames.push('Griefing');
+        if (reasons & 8) reasonNames.push('Suspicious');
+        if (reasons & 16) reasonNames.push('AbilityAbuse');
+        if (reasons === 0) reasonNames.push('Unknown');
+        
+        const reasonsText = reasonNames.length > 0 ? ` (${reasonNames.join(', ')})` : '';
+        
+        html += `
+            <div class="conduct-reasons-card">
+                <h3>Reasons</h3>
+                <div class="conduct-reasons-value">${reasons}${reasonsText}</div>
+                <div class="conduct-reasons-note">Report reasons from the conduct scorecard.</div>
+            </div>
+        `;
+        
+        if (data.match_id && data.account_id) {
+            html += `
+                <div style="margin-top: var(--spacing-md); display: flex; justify-content: center; gap: var(--spacing-md); flex-wrap: wrap;">
+                    <button id="validate-report-card-btn" class="btn primary-btn" 
+                            data-match-id="${data.match_id}" 
+                            data-account-id="${data.account_id}">
+                        Validate Report Card
+                    </button>
+                    <button id="validate-report-card-current-btn" class="btn secondary-btn" 
+                            data-match-id="${data.match_id}" 
+                            data-account-id="${data.account_id}">
+                        Current
+                    </button>
+                </div>
+                <div id="validate-report-card-status" style="margin-top: var(--spacing-sm); text-align: center; color: var(--text-secondary); font-size: 0.9rem;"></div>
+            `;
+        }
+        
+        html += `
+            <div class="conduct-theories-card">
+                <h3>Why counts might not match analysis:</h3>
+                <ul class="conduct-theories-list">
+                    <li>Most reports may be ignored if players abuse the reporting system</li>
+                    <li>There may be a hidden limit to reports that we don't realize</li>
+                    <li>Report counts may refresh on a certain day of the week</li>
+                    <li>The overwatch report checkbox - when reporting someone, there's a checkbox if you have an 'overwatch report' available</li>
+                </ul>
+            </div>
+        `;
+        
+        scorecardContent.innerHTML = html;
+        
+        const validateBtn = document.getElementById('validate-report-card-btn');
+        if (validateBtn && !validateBtn.hasAttribute('data-listener-attached')) {
+            validateBtn.setAttribute('data-listener-attached', 'true');
+            validateBtn.addEventListener('click', () => {
+                const matchId = validateBtn.getAttribute('data-match-id');
+                const accountId = validateBtn.getAttribute('data-account-id');
+                validateReportCard(parseInt(matchId), parseInt(accountId), false);
+            });
+        }
+        
+        const validateCurrentBtn = document.getElementById('validate-report-card-current-btn');
+        if (validateCurrentBtn && !validateCurrentBtn.hasAttribute('data-listener-attached')) {
+            validateCurrentBtn.setAttribute('data-listener-attached', 'true');
+            validateCurrentBtn.addEventListener('click', () => {
+                const matchId = validateCurrentBtn.getAttribute('data-match-id');
+                const accountId = validateCurrentBtn.getAttribute('data-account-id');
+                validateReportCard(parseInt(matchId), parseInt(accountId), true);
+            });
+        }
+    }
+
+    let validateReportCardInProgress = false;
+
+    function validateReportCard(matchId, accountId, isCurrent) {
+        const statusDiv = document.getElementById('validate-report-card-status');
+        const btn = isCurrent ? document.getElementById('validate-report-card-current-btn') : document.getElementById('validate-report-card-btn');
+        const otherBtn = isCurrent ? document.getElementById('validate-report-card-btn') : document.getElementById('validate-report-card-current-btn');
+        
+        if (!statusDiv || !btn) return;
+        
+        if (validateReportCardInProgress) {
+            statusDiv.textContent = 'Another validation is already in progress. Please wait...';
+            statusDiv.style.color = 'var(--warning-color)';
+            return;
+        }
+        
+        validateReportCardInProgress = true;
+        btn.disabled = true;
+        if (otherBtn) otherBtn.disabled = true;
+        btn.textContent = isCurrent ? 'Fetching Current...' : 'Validating...';
+        statusDiv.textContent = isCurrent ? 'Fetching games after match ID...' : 'Fetching match history and downloading replays (this may take several minutes)...';
+        statusDiv.style.color = 'var(--text-secondary)';
+        
+        const endpoint = isCurrent ? '/api/steam/validate-report-card-current' : '/api/steam/validate-report-card';
+        
+        fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                matchId: matchId,
+                accountId: accountId
+            })
+        })
+            .then(res => {
+                if (!res.ok) {
+                    return res.text().then(text => {
+                        throw new Error(text || `HTTP ${res.status}`);
+                    });
+                }
+                return res.json();
+            })
+            .then(data => {
+                const total = data.total || 0;
+                const downloaded = data.downloaded?.length || 0;
+                const skipped = data.skipped?.length || 0;
+                const errors = data.errors?.length || 0;
+                
+                let message = '';
+                if (data.message) {
+                    message = data.message;
+                } else {
+                    message = `Downloaded: ${downloaded}, Skipped: ${skipped}`;
+                    if (errors > 0) {
+                        message += `, Errors: ${errors}`;
+                    }
+                    message += ` (Total: ${total})`;
+                }
+                
+                if (data.directory) {
+                    message += `\nSaved to: ${data.directory}`;
+                }
+                
+                statusDiv.textContent = message;
+                statusDiv.style.color = errors > 0 ? 'var(--warning-color)' : (data.message && data.message.includes('not downloading') ? 'var(--text-secondary)' : 'var(--success-color)');
+                validateReportCardInProgress = false;
+                btn.disabled = false;
+                btn.textContent = isCurrent ? 'Current' : 'Validate Report Card';
+                if (otherBtn) otherBtn.disabled = false;
+            })
+            .catch(err => {
+                console.error('Error validating report card:', err);
+                if (err.name === 'AbortError' || err.message.includes('aborted')) {
+                    statusDiv.textContent = 'Request was cancelled. The download may still be in progress on the server.';
+                    statusDiv.style.color = 'var(--warning-color)';
+                } else {
+                    statusDiv.textContent = `Error: ${err.message}`;
+                    statusDiv.style.color = 'var(--danger-color)';
+                }
+                validateReportCardInProgress = false;
+                btn.disabled = false;
+                btn.textContent = isCurrent ? 'Current' : 'Validate Report Card';
+                if (otherBtn) otherBtn.disabled = false;
+            });
+    }
+
     function pollSteamStatus() {
-        fetch('/api/steam/status')
+        fetchWithRetry('/api/steam/status', {}, 2, 500)
             .then(res => res.json())
             .then(data => {
-                updateSteamUI(data.status, data.statusText);
+                updateSteamUI(data.status, data.statusText, data.errorMessage);
             })
-            .catch(err => console.error('Steam status poll failed:', err));
+            .catch(err => {
+                console.error('Steam status poll failed:', err);
+                // Don't show error for polling failures, just log
+            });
     }
 
     // Start polling on load
     pollSteamStatus();
     steamPollingInterval = setInterval(pollSteamStatus, 2000);
 
-    steamLoginBtn.addEventListener('click', () => {
+    if (steamLoginBtn) {
+        steamLoginBtn.addEventListener('click', () => {
         const username = steamUserInput.value.trim();
         const password = steamPassInput.value.trim();
         const isSubmittingCode = steamLoginBtn.textContent === 'Submit Code';
@@ -519,27 +960,46 @@ document.addEventListener('DOMContentLoaded', () => {
         steamLoginBtn.disabled = true;
         steamLoginBtn.textContent = code ? 'Submitting Code...' : 'Connecting...';
 
-        fetch('/api/steam/login', {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 35000);
+        
+        fetchWithRetry('/api/steam/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, password, code })
-        })
-        .then(res => {
+            body: JSON.stringify({ username, password, code }),
+            signal: controller.signal
+        }, 2, 2000)
+        .then(async res => {
+            clearTimeout(timeoutId);
+            const contentType = res.headers.get('content-type');
             if (!res.ok) {
-                return res.text().then(text => {
-                    throw new Error(`Server error (${res.status}): ${text}`);
-                });
+                let errorText = '';
+                if (contentType && contentType.includes('application/json')) {
+                    const data = await res.json();
+                    errorText = data.error || data.message || `HTTP ${res.status}`;
+                    // If we got status info, update UI
+                    if (data.status !== undefined) {
+                        pollSteamStatus();
+                        if (data.status === 2) {
+                            steamLoginBtn.disabled = false;
+                            steamLoginBtn.textContent = 'Submit Code';
+                        }
+                    }
+                } else {
+                    errorText = await res.text();
+                }
+                throw new Error(errorText || `Server error (${res.status})`);
             }
             return res.json();
         })
         .then(data => {
-             // Status update will happen via polling
              pollSteamStatus();
-             // Re-enable button after a short delay if status hasn't changed to ready
              setTimeout(() => {
-                 const currentStatus = parseInt(steamStatusText.textContent.match(/Status: (.+)/)?.[1] || '');
                  if (steamLoginBtn.textContent.includes('Submitting') || steamLoginBtn.textContent.includes('Connecting')) {
-                     if (data.status !== 4) { // Not GCReady
+                     if (data.status === 2) {
+                         steamLoginBtn.disabled = false;
+                         steamLoginBtn.textContent = 'Submit Code';
+                     } else if (data.status !== 3 && data.status !== 4) {
                          steamLoginBtn.disabled = false;
                          steamLoginBtn.textContent = originalText;
                      }
@@ -547,16 +1007,32 @@ document.addEventListener('DOMContentLoaded', () => {
              }, 2000);
         })
         .catch(err => {
+            clearTimeout(timeoutId);
             console.error('Steam login error:', err);
-            alert('Failed to send login request: ' + err.message);
+            // Try to get current status to update UI
+            pollSteamStatus();
+            const errorMsg = err.name === 'AbortError' ? 'Request timed out. Please check your connection and try again.' : (err.message || 'Failed to send login request');
+            if (err.name !== 'AbortError') {
+                alert('Failed to send login request: ' + errorMsg);
+            } else {
+                // For timeout, just update UI without alert
+                console.warn('Login request timed out');
+            }
             steamLoginBtn.disabled = false;
             steamLoginBtn.textContent = originalText;
+            // Clear error message display if present
+            const errorDisplay = document.getElementById('steam-error-message');
+            if (errorDisplay) {
+                errorDisplay.style.display = 'none';
+            }
         });
     });
+    }
 
     // Disconnect button handler
-    steamDisconnectBtn.addEventListener('click', () => {
-        if (!confirm('Are you sure you want to disconnect from Steam?')) {
+    if (steamDisconnectBtn) {
+        steamDisconnectBtn.addEventListener('click', () => {
+            if (!confirm('Are you sure you want to disconnect from Steam?')) {
             return;
         }
 
@@ -564,15 +1040,14 @@ document.addEventListener('DOMContentLoaded', () => {
         steamDisconnectBtn.disabled = true;
         steamDisconnectBtn.textContent = 'Disconnecting...';
 
-        fetch('/api/steam/disconnect', {
+        fetchWithRetry('/api/steam/disconnect', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
-        })
-        .then(res => {
+        }, 2, 1000)
+        .then(async res => {
             if (!res.ok) {
-                return res.text().then(text => {
-                    throw new Error(`Server error (${res.status}): ${text}`);
-                });
+                const text = await res.text();
+                throw new Error(`Server error (${res.status}): ${text}`);
             }
             return res.json();
         })
@@ -589,85 +1064,49 @@ document.addEventListener('DOMContentLoaded', () => {
             steamDisconnectBtn.disabled = false;
             steamDisconnectBtn.textContent = originalText;
         });
-    });
+        });
+    }
     
     // Load from localStorage
     function loadFromStorage() {
-        const savedToken = localStorage.getItem('stratzApiToken');
-        const savedSteamKey = localStorage.getItem('steamApiKey');
+        const savedReplayDir = localStorage.getItem('replayDir');
         const savedSteamUser = localStorage.getItem('steamUser');
         const savedSteamPass = localStorage.getItem('steamPass');
         const savedSteamId = localStorage.getItem('steamId');
+        const savedSteamApiKey = localStorage.getItem('steamApiKey');
         
-        if (savedToken) {
-            stratzApiTokenInput.value = savedToken;
-            console.log('Loaded token from localStorage (length:', savedToken.length, ')');
-        }
-        if (savedSteamKey) {
-            steamApiKeyInput.value = savedSteamKey;
-        }
-        if (savedSteamUser) {
-            steamUserInput.value = savedSteamUser;
-        }
-        if (savedSteamPass) {
-            steamPassInput.value = savedSteamPass;
-        }
+        if (savedReplayDir) replayDirInput.value = savedReplayDir;
+        if (savedSteamUser) steamUserInput.value = savedSteamUser;
+        if (savedSteamPass) steamPassInput.value = savedSteamPass;
         if (savedSteamId) steamIdInput.value = savedSteamId;
+        if (savedSteamApiKey) steamApiKeyInput.value = savedSteamApiKey;
     }
 
     // Save to localStorage
     function saveToStorage() {
-        if (stratzApiTokenInput.value) localStorage.setItem('stratzApiToken', stratzApiTokenInput.value);
-        if (steamApiKeyInput.value) localStorage.setItem('steamApiKey', steamApiKeyInput.value);
+        if (replayDirInput.value) localStorage.setItem('replayDir', replayDirInput.value);
         if (steamUserInput.value) localStorage.setItem('steamUser', steamUserInput.value);
         if (steamPassInput.value) localStorage.setItem('steamPass', steamPassInput.value);
         if (steamIdInput.value) localStorage.setItem('steamId', steamIdInput.value);
+        if (steamApiKeyInput.value) localStorage.setItem('steamApiKey', steamApiKeyInput.value);
     }
 
     // Load from localStorage first (before server config)
     loadFromStorage();
 
-    // Auto-save token to server if it exists in localStorage on page load
-    const initialToken = localStorage.getItem('stratzApiToken');
-    if (initialToken && initialToken.trim() !== '') {
-        setTimeout(() => {
-            fetch('/api/config', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ stratzApiToken: initialToken })
-            }).catch(err => console.error('Auto-save on load failed:', err));
-        }, 500);
-    }
-
-    // Final safety check after a short delay to catch any browser clearing behavior
-    setTimeout(() => {
-        if (!stratzApiTokenInput.value) {
-            const savedToken = localStorage.getItem('stratzApiToken');
-            if (savedToken) {
-                console.log('Late check: Token field was cleared, restoring from localStorage');
-                stratzApiTokenInput.value = savedToken;
-            }
-        }
-    }, 1000);
-
     // Load Config from server (will override localStorage if present)
-    fetch('/api/config')
+    fetchWithRetry('/api/config', {}, 2, 1000)
         .then(res => res.json())
         .then(config => {
             replayDirInput.value = config.replayDir || '';
-            // Only update token if server has a non-empty value
-            if (config.stratzApiToken && config.stratzApiToken.trim() !== '') {
-                console.log('Server has token, updating from server (length:', config.stratzApiToken.length, ')');
-                stratzApiTokenInput.value = config.stratzApiToken;
-                localStorage.setItem('stratzApiToken', config.stratzApiToken);
-            } else {
-                console.log('Server token is empty/missing, keeping localStorage value');
-            }
             
+            // Only update steamApiKey if server has a non-empty value
+            // This preserves localStorage value if server returns empty string
             if (config.steamApiKey && config.steamApiKey.trim() !== '') {
                 steamApiKeyInput.value = config.steamApiKey;
                 localStorage.setItem('steamApiKey', config.steamApiKey);
             }
+            // If server returns empty/undefined, keep what was loaded from localStorage
 
             if (config.steamUser && config.steamUser.trim() !== '') {
                 steamUserInput.value = config.steamUser;
@@ -678,68 +1117,47 @@ document.addEventListener('DOMContentLoaded', () => {
                 steamPassInput.value = config.steamPass;
                 localStorage.setItem('steamPass', config.steamPass);
             }
-
-            // If server token is empty/missing, keep the localStorage value (already loaded above)
-            // Double-check: if token field is empty but localStorage has it, restore it
-            if (!stratzApiTokenInput.value) {
-                const savedToken = localStorage.getItem('stratzApiToken');
-                if (savedToken) {
-                    console.log('Token field was cleared, restoring from localStorage');
-                    stratzApiTokenInput.value = savedToken;
-                }
-            }
-            loadReplays();
+            browseDirectory(currentPath);
         })
         .catch(() => {
-            // If server config fails, values from loadFromStorage() above will be used
-            // Double-check token is still there
-            if (!stratzApiTokenInput.value) {
-                const savedToken = localStorage.getItem('stratzApiToken');
-                if (savedToken) {
-                    stratzApiTokenInput.value = savedToken;
-                }
-            }
         });
 
-    // Auto-save token when it changes (with debounce)
+    // Auto-save config fields when they change (with debounce)
     let saveTokenTimeout;
     const autoSave = () => {
-        const token = stratzApiTokenInput.value.trim();
-        const steamKey = steamApiKeyInput.value.trim();
-        // Also save steam credentials locally if changed
+        const replayDir = replayDirInput.value.trim();
         const steamUser = steamUserInput.value.trim();
         const steamPass = steamPassInput.value.trim();
+        const steamApiKey = steamApiKeyInput.value.trim();
         
-        localStorage.setItem('stratzApiToken', token);
-        localStorage.setItem('steamApiKey', steamKey);
+        if (replayDir) localStorage.setItem('replayDir', replayDir);
         if (steamUser) localStorage.setItem('steamUser', steamUser);
         if (steamPass) localStorage.setItem('steamPass', steamPass);
+        if (steamApiKey) localStorage.setItem('steamApiKey', steamApiKey);
         
         // Auto-save to server after user stops typing (1 second delay)
         clearTimeout(saveTokenTimeout);
         saveTokenTimeout = setTimeout(() => {
             const payload = {};
-            if (token) payload.stratzApiToken = token;
-            if (steamKey) payload.steamApiKey = steamKey;
+            if (replayDir) payload.replayDir = replayDir;
             if (steamUser) payload.steamUser = steamUser;
             if (steamPass) payload.steamPass = steamPass;
+            if (steamApiKey) payload.steamApiKey = steamApiKey;
 
             if (Object.keys(payload).length > 0) {
-                fetch('/api/config', {
+                fetchWithRetry('/api/config', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
-                }).catch(err => console.error('Auto-save failed:', err));
+                }, 2, 1000).catch(err => console.error('Auto-save failed:', err));
             }
         }, 1000);
     };
 
-    stratzApiTokenInput.addEventListener('input', autoSave);
-    steamApiKeyInput.addEventListener('input', autoSave);
-    stratzApiTokenInput.addEventListener('change', autoSave);
-    steamApiKeyInput.addEventListener('change', autoSave);
+    replayDirInput.addEventListener('input', autoSave);
     steamUserInput.addEventListener('input', autoSave);
     steamPassInput.addEventListener('input', autoSave);
+    steamApiKeyInput.addEventListener('input', autoSave);
     
     steamIdInput.addEventListener('input', () => {
         if (steamIdInput.value) localStorage.setItem('steamId', steamIdInput.value);
@@ -753,55 +1171,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Save Config
     saveConfigBtn.addEventListener('click', () => {
-        const newDir = replayDirInput.value;
-        const newToken = stratzApiTokenInput.value.trim();
-        const newSteamKey = steamApiKeyInput.value.trim();
+        const newDir = replayDirInput.value.trim();
+        const newApiKey = steamApiKeyInput.value.trim();
         const newSteamUser = steamUserInput.value.trim();
         const newSteamPass = steamPassInput.value.trim();
 
-        console.log('Saving config - Token length:', newToken.length);
-        
-        // Save to localStorage immediately
-        if (newToken) {
-            localStorage.setItem('stratzApiToken', newToken);
-            console.log('Saved token to localStorage');
-        } else {
-            console.warn('Token is empty when saving!');
-        }
-        if (newSteamKey) {
-            localStorage.setItem('steamApiKey', newSteamKey);
-        }
-        if (newSteamUser) localStorage.setItem('steamUser', newSteamUser);
-        if (newSteamPass) localStorage.setItem('steamPass', newSteamPass);
-
         saveToStorage();
         
-        const payload = { replayDir: newDir };
-        if (newToken) {
-            payload.stratzApiToken = newToken;
-        }
-        if (newSteamKey) {
-            payload.steamApiKey = newSteamKey;
-        }
+        const payload = {};
+        if (newDir) payload.replayDir = newDir;
+        if (newApiKey) payload.steamApiKey = newApiKey;
         if (newSteamUser) payload.steamUser = newSteamUser;
         if (newSteamPass) payload.steamPass = newSteamPass;
         
-        fetch('/api/config', {
+        fetchWithRetry('/api/config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
-        })
+        }, 2, 1000)
             .then(res => res.json())
             .then(config => {
-                console.log('Server response - Token length:', config.stratzApiToken ? config.stratzApiToken.length : 0);
-                // Ensure localStorage is updated with what server saved
-                if (config.stratzApiToken) {
-                    localStorage.setItem('stratzApiToken', config.stratzApiToken);
-                    stratzApiTokenInput.value = config.stratzApiToken;
-                }
-                if (config.steamApiKey) {
-                    localStorage.setItem('steamApiKey', config.steamApiKey);
-                    steamApiKeyInput.value = config.steamApiKey;
+                if (config.replayDir) {
+                    localStorage.setItem('replayDir', config.replayDir);
+                    replayDirInput.value = config.replayDir;
                 }
                 if (config.steamUser) {
                     localStorage.setItem('steamUser', config.steamUser);
@@ -811,8 +1203,12 @@ document.addEventListener('DOMContentLoaded', () => {
                     localStorage.setItem('steamPass', config.steamPass);
                     steamPassInput.value = config.steamPass;
                 }
+                if (config.steamApiKey) {
+                    localStorage.setItem('steamApiKey', config.steamApiKey);
+                    steamApiKeyInput.value = config.steamApiKey;
+                }
                 alert('Configuration saved!');
-                loadReplays();
+                browseDirectory(currentPath);
             })
             .catch(err => {
                 console.error('Error saving config:', err);
@@ -820,14 +1216,19 @@ document.addEventListener('DOMContentLoaded', () => {
             });
     });
 
-    let currentReplays = [];
-    let sortOrder = 'desc'; // 'desc' (newest first) or 'asc' (oldest first)
-
-    function loadReplays(profileNameOverride) {
-        replayList.innerHTML = '<p class="loading">Loading replays...</p>';
+    const browseBackBtn = document.getElementById('browse-back');
+    
+    function browseDirectory(path = '', profileNameOverride, silent = false) {
+        if (!replayList) {
+            console.error('replayList element not found');
+            return;
+        }
+        if (!silent) {
+            replayList.innerHTML = '<p class="loading">Loading...</p>';
+        }
         const profileName = profileNameOverride !== undefined ? profileNameOverride : getSelectedProfileName();
-        const url = '/api/replays?t=' + Date.now() + (profileName ? '&profile=' + encodeURIComponent(profileName) : '');
-        console.log('Loading replays for profile:', profileName, 'URL:', url);
+        const url = '/api/browse?t=' + Date.now() + (profileName ? '&profile=' + encodeURIComponent(profileName) : '') + (path ? '&path=' + encodeURIComponent(path) : '');
+        
         fetch(url)
             .then(res => {
                 if (!res.ok) {
@@ -835,74 +1236,172 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 return res.json();
             })
-            .then(replays => {
-                console.log('Loaded replays:', replays.length);
-                currentReplays = replays || [];
-                renderReplayList();
-                if (window.updateHistoryStatus) {
+            .then(items => {
+                const pathChanged = currentPath !== path;
+                currentPath = path;
+                browseBackBtn.style.display = path ? 'inline-block' : 'none';
+                renderBrowseList(items, silent && !pathChanged);
+                if (window.updateHistoryStatus && !silent) {
                     window.updateHistoryStatus();
                 }
             })
             .catch(err => {
-                console.error('Error loading replays:', err);
-                replayList.innerHTML = `<p style="color:red">Error loading replays: ${err}</p>`;
+                console.error('Error browsing directory:', err);
+                if (!silent) {
+                    replayList.innerHTML = `<p style="color:red">Error browsing directory: ${err}</p>`;
+                }
             });
     }
 
     setInterval(() => {
         if (document.visibilityState === 'visible') {
-            loadReplays();
+            browseDirectory(currentPath, undefined, true);
         }
     }, 120000);
     
-    function renderReplayList() {
-        replayList.innerHTML = '';
-        if (!currentReplays || currentReplays.length === 0) {
-            replayList.innerHTML = '<p>No .dem files found in directory.</p>';
+    function renderBrowseList(items, preserveState = false) {
+        if (!items || items.length === 0) {
+            if (!preserveState) {
+                replayList.innerHTML = '<p>Directory is empty.</p>';
+            }
             return;
         }
 
-        // Sort replays
-        currentReplays.sort((a, b) => {
-            const dateA = a.date ? new Date(a.date) : new Date(0);
-            const dateB = b.date ? new Date(b.date) : new Date(0);
-            return sortOrder === 'desc' ? dateB - dateA : dateA - dateB;
-        });
+        if (preserveState) {
+            const scrollTop = replayList.scrollTop;
+            const checkedPaths = new Set(Array.from(document.querySelectorAll('.replay-item input[type="checkbox"]:checked')).map(cb => cb.value));
+            const existingItems = new Map();
+            Array.from(replayList.children).forEach(child => {
+                const checkbox = child.querySelector('input[type="checkbox"]');
+                if (checkbox) {
+                    existingItems.set(checkbox.value, { checked: checkbox.checked, element: child });
+                } else {
+                    const label = child.querySelector('label');
+                    if (label) {
+                        const dirName = label.textContent.trim().replace('/', '');
+                        existingItems.set(`dir:${dirName}`, { element: child });
+                    }
+                }
+            });
 
-        currentReplays.forEach(replay => {
-            const div = document.createElement('div');
-            div.className = 'replay-item';
-            const fileName = replay.fileName || replay;
-            const id = fileName.replace('.dem', '');
-            const date = replay.date ? new Date(replay.date).toLocaleString() : '';
-            const dateDisplay = date ? ` <span class="date-display">(${date})</span>` : '';
-            div.innerHTML = `
-                <input type="checkbox" value="${id}" id="replay-${id}">
-                <label for="replay-${id}">${fileName}${dateDisplay}</label>
-            `;
-            replayList.appendChild(div);
-        });
+            const newItems = new Set();
+            items.forEach(item => {
+                if (item.isFile && item.name.endsWith('.dem')) {
+                    const fullPath = currentPath ? `${currentPath}/${item.name}` : item.name;
+                    newItems.add(fullPath);
+                } else if (item.isDir) {
+                    newItems.add(`dir:${item.name}`);
+                }
+            });
+
+            const fragment = document.createDocumentFragment();
+            let hasChanges = false;
+
+            existingItems.forEach((data, path) => {
+                if (!newItems.has(path)) {
+                    data.element.remove();
+                    hasChanges = true;
+                }
+            });
+
+            items.forEach(item => {
+                if (item.isFile && item.name.endsWith('.dem')) {
+                    const matchId = item.name.replace('.dem', '');
+                    const fullPath = currentPath ? `${currentPath}/${item.name}` : item.name;
+                    const escapedPath = fullPath.replace(/"/g, '&quot;');
+                    const existing = existingItems.get(fullPath);
+                    
+                    if (!existing) {
+                        const div = document.createElement('div');
+                        div.className = 'replay-item';
+                        const date = item.date ? new Date(item.date).toLocaleString() : '';
+                        const dateDisplay = date ? ` <span class="date-display">(${date})</span>` : '';
+                        div.innerHTML = `
+                            <input type="checkbox" value="${escapedPath}" id="replay-${matchId}" data-match-id="${matchId}" ${checkedPaths.has(fullPath) ? 'checked' : ''}>
+                            <label for="replay-${matchId}" style="cursor: pointer;">${item.name}${dateDisplay}</label>
+                        `;
+                        fragment.appendChild(div);
+                        hasChanges = true;
+                    } else {
+                        const checkbox = existing.element.querySelector('input[type="checkbox"]');
+                        if (checkbox && checkbox.checked !== checkedPaths.has(fullPath)) {
+                            checkbox.checked = checkedPaths.has(fullPath);
+                        }
+                    }
+                } else if (item.isDir) {
+                    const existing = existingItems.get(`dir:${item.name}`);
+                    if (!existing) {
+                        const div = document.createElement('div');
+                        div.className = 'replay-item';
+                        const escapedPath = item.path.replace(/'/g, "\\'");
+                        div.innerHTML = `
+                            <span style="margin-right: 8px;">📁</span>
+                            <label style="cursor: pointer; flex: 1;" onclick="window.browseDirectory('${escapedPath}')">${item.name}/</label>
+                        `;
+                        fragment.appendChild(div);
+                        hasChanges = true;
+                    }
+                }
+            });
+
+            if (hasChanges && fragment.hasChildNodes()) {
+                replayList.appendChild(fragment);
+            }
+            replayList.scrollTop = scrollTop;
+        } else {
+            replayList.innerHTML = '';
+            items.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'replay-item';
+                
+                if (item.isDir) {
+                    const escapedPath = item.path.replace(/'/g, "\\'");
+                    div.innerHTML = `
+                        <span style="margin-right: 8px;">📁</span>
+                        <label style="cursor: pointer; flex: 1;" onclick="window.browseDirectory('${escapedPath}')">${item.name}/</label>
+                    `;
+                } else if (item.isFile && item.name.endsWith('.dem')) {
+                    const matchId = item.name.replace('.dem', '');
+                    const fullPath = currentPath ? `${currentPath}/${item.name}` : item.name;
+                    const escapedPath = fullPath.replace(/"/g, '&quot;');
+                    const date = item.date ? new Date(item.date).toLocaleString() : '';
+                    const dateDisplay = date ? ` <span class="date-display">(${date})</span>` : '';
+                    div.innerHTML = `
+                        <input type="checkbox" value="${escapedPath}" id="replay-${matchId}" data-match-id="${matchId}">
+                        <label for="replay-${matchId}" style="cursor: pointer;">${item.name}${dateDisplay}</label>
+                    `;
+                } else {
+                    return;
+                }
+                
+                replayList.appendChild(div);
+            });
+        }
     }
 
-    sortDateBtn.addEventListener('click', () => {
-        sortOrder = sortOrder === 'desc' ? 'asc' : 'desc';
-        sortDateBtn.textContent = sortOrder === 'desc' ? 'Sort: Newest' : 'Sort: Oldest';
-        renderReplayList();
-    });
+    if (browseBackBtn) {
+        browseBackBtn.addEventListener('click', () => {
+            const parts = currentPath.split('/').filter(p => p);
+            parts.pop();
+            const newPath = parts.join('/');
+            browseDirectory(newPath);
+        });
+    }
     
-    window.loadReplays = loadReplays;
+    window.browseDirectory = browseDirectory;
+    window.loadReplays = () => browseDirectory('');
 
     function deleteSelectedReplays() {
         const checkboxes = document.querySelectorAll('.replay-item input[type="checkbox"]:checked');
-        const selectedIds = Array.from(checkboxes).map(cb => cb.value);
+        const selectedPaths = Array.from(checkboxes).map(cb => cb.value);
         
-        if (selectedIds.length === 0) {
+        if (selectedPaths.length === 0) {
             alert('Please select at least one replay to delete.');
             return;
         }
         
-        const fileNames = selectedIds.map(id => id + '.dem').join(', ');
-        if (!confirm(`Are you sure you want to delete ${selectedIds.length} replay file(s)?\n\n${fileNames}\n\nThis cannot be undone.`)) {
+        const fileNames = selectedPaths.map(path => path.split('/').pop()).join(', ');
+        if (!confirm(`Are you sure you want to delete ${selectedPaths.length} replay file(s)?\n\n${fileNames}\n\nThis cannot be undone.`)) {
             return;
         }
         
@@ -910,22 +1409,24 @@ document.addEventListener('DOMContentLoaded', () => {
         deleteSelectedBtn.disabled = true;
         deleteSelectedBtn.textContent = 'Deleting...';
         
-        const deletePromises = selectedIds.map(matchId => 
-            fetch('/api/delete', {
+        const deletePromises = selectedPaths.map(filePath => {
+            const matchId = filePath.split('/').pop().replace('.dem', '');
+            return fetch('/api/delete', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ 
                     matchId: matchId,
+                    filePath: filePath,
                     profileName: getSelectedProfileName()
                 })
             }).then(async res => {
                 if (!res.ok) {
                     const errorText = await res.text();
-                    throw new Error(`Failed to delete ${matchId}: ${errorText || res.statusText}`);
+                    throw new Error(`Failed to delete ${filePath}: ${errorText || res.statusText}`);
                 }
                 return res.json();
-            })
-        );
+            });
+        });
         
         Promise.allSettled(deletePromises)
             .then(results => {
@@ -944,7 +1445,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 
                 deleteSelectedBtn.textContent = originalText;
                 deleteSelectedBtn.disabled = false;
-                loadReplays();
+                browseDirectory(currentPath);
                 // Update history status indicators if available
                 if (window.updateHistoryStatus) {
                     window.updateHistoryStatus();
@@ -957,10 +1458,12 @@ document.addEventListener('DOMContentLoaded', () => {
             });
     }
 
-    refreshReplaysBtn.addEventListener('click', loadReplays);
+    refreshReplaysBtn.addEventListener('click', () => browseDirectory(currentPath));
 
     selectAllBtn.addEventListener('click', () => {
-        document.querySelectorAll('.replay-item input[type="checkbox"]').forEach(cb => cb.checked = true);
+        document.querySelectorAll('.replay-item input[type="checkbox"]').forEach(cb => {
+            if (cb.value.endsWith('.dem')) cb.checked = true;
+        });
         updatePlayerSelection();
     });
 
@@ -971,7 +1474,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     selectLastBtn.addEventListener('click', () => {
         const count = parseInt(selectLastCountInput.value) || 10;
-        const checkboxes = Array.from(document.querySelectorAll('.replay-item input[type="checkbox"]'));
+        const checkboxes = Array.from(document.querySelectorAll('.replay-item input[type="checkbox"]')).filter(cb => cb.value.endsWith('.dem'));
         checkboxes.forEach(cb => cb.checked = false);
         const newestX = checkboxes.slice(0, count);
         newestX.forEach(cb => cb.checked = true);
@@ -1024,7 +1527,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const confirmedTimelineData = [];
         const unconfirmedTimelineData = [];
 
-        for (const matchId of selectedIds) {
+        for (const filePath of selectedIds) {
+            // Extract match ID from file path for display (e.g., "fatal/2025-11-17/8561630135.dem" -> "8561630135")
+            const matchId = filePath.split('/').pop().replace('.dem', '');
             progressText.textContent = `Processing ${processedCount + 1} / ${selectedIds.length}: ${matchId}`;
 
             try {
@@ -1033,6 +1538,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         matchId: matchId,
+                        filePath: filePath,
                         reportedSlot: -1,
                         reportedSteamId: "0",
                         profileName: getSelectedProfileName()
@@ -1075,6 +1581,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 matchData.push({
                     matchID: result.MatchID,
+                    filePath: filePath, // Store filePath for later use (e.g., player-info)
                     teamReports: uniqueTeamReports,
                     enemyReports: uniqueEnemyReports,
                     confirmedTeamReports: confirmedTeamReports,
@@ -1112,7 +1619,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
             } catch (err) {
-                console.error(`Error processing ${matchId}:`, err);
+                console.error(`Error processing ${matchId} (${filePath}):`, err);
             }
 
             processedCount++;
@@ -1332,6 +1839,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     matchId: String(matchData.matchID),
+                    filePath: matchData.filePath || '', // Include filePath if available
                     profileName: getSelectedProfileName()
                 })
             });
@@ -1541,8 +2049,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const canvas = document.createElement('canvas');
         canvas.id = 'timeline-graph';
+        const tooltip = document.createElement('div');
+        tooltip.id = 'timeline-tooltip';
+        tooltip.className = 'timeline-tooltip hidden';
         timelineGraphContainer.innerHTML = '';
         timelineGraphContainer.appendChild(canvas);
+        timelineGraphContainer.appendChild(tooltip);
 
         const ctx = canvas.getContext('2d');
         const padding = { top: 60, right: 40, bottom: 60, left: 80 };
@@ -1788,24 +2300,25 @@ document.addEventListener('DOMContentLoaded', () => {
             ctx.fillText('FRIENDLY', containerWidth / 2, padding.top - 20);
             ctx.fillText('ENEMY', containerWidth / 2, padding.top + teamRegionHeight + 20);
 
-            const timeStep = Math.ceil(timeRange / 10);
-            for (let i = 0; i <= 10; i++) {
-                const time = (i * timeRange) / 10;
+            const numLabels = Math.min(20, Math.ceil(timeRange / 2));
+            for (let i = 0; i <= numLabels; i++) {
+                const time = (i * timeRange) / numLabels;
                 const x = padding.left + (time / timeRange) * graphWidth;
                 const minutes = Math.floor(time);
                 const seconds = Math.floor((time - minutes) * 60);
                 const timeLabel = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
                 
-                ctx.strokeStyle = '#334155';
+                ctx.strokeStyle = '#475569';
+                ctx.lineWidth = 0.5;
                 ctx.beginPath();
                 ctx.moveTo(x, padding.top);
                 ctx.lineTo(x, totalHeight - padding.bottom);
                 ctx.stroke();
                 
-                ctx.fillStyle = '#64748b';
-                ctx.font = '10px Inter';
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '11px Inter';
                 ctx.textAlign = 'center';
-                ctx.fillText(timeLabel, x, totalHeight - padding.bottom + 20);
+                ctx.fillText(timeLabel, x, totalHeight - padding.bottom + 18);
             }
 
             iconPositions.forEach(({ report, x, y, team }) => {
@@ -1866,14 +2379,55 @@ document.addEventListener('DOMContentLoaded', () => {
 
         canvas.addEventListener('mousemove', (e) => {
             const rect = canvas.getBoundingClientRect();
-            const x = e.clientX - rect.left;
-            const y = e.clientY - rect.top;
+            const scaleX = rect.width / containerWidth;
+            const scaleY = rect.height / totalHeight;
+            const x = (e.clientX - rect.left) / scaleX;
+            const y = (e.clientY - rect.top) / scaleY;
             
-            const time = ((x - padding.left) / graphWidth) * timeRange;
-            const timeMinutes = Math.floor(time);
-            const timeSeconds = Math.floor((time - timeMinutes) * 60);
+            const iconRadius = iconSize / 2;
+            let hoveredIcon = null;
             
-            canvas.title = `${String(timeMinutes).padStart(2, '0')}:${String(timeSeconds).padStart(2, '0')}`;
+            for (const pos of iconPositions) {
+                const centerX = pos.x;
+                const centerY = pos.y + iconSize / 2;
+                const dx = x - centerX;
+                const dy = y - centerY;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                
+                if (distance <= iconRadius) {
+                    hoveredIcon = pos;
+                    break;
+                }
+            }
+            
+            if (hoveredIcon) {
+                const timestamp = hoveredIcon.report.Time;
+                const heroName = hoveredIcon.report.TargetHero || hoveredIcon.report.Hero;
+                tooltip.textContent = `${heroName || 'Unknown'}: ${timestamp}`;
+                tooltip.style.visibility = 'hidden';
+                tooltip.classList.remove('hidden');
+                
+                const tooltipRect = tooltip.getBoundingClientRect();
+                let left = e.clientX + 15;
+                let top = e.clientY - tooltipRect.height - 10;
+                
+                if (left + tooltipRect.width > window.innerWidth - 10) {
+                    left = e.clientX - tooltipRect.width - 15;
+                }
+                if (top < 10) {
+                    top = e.clientY + 15;
+                }
+                
+                tooltip.style.left = `${left}px`;
+                tooltip.style.top = `${top}px`;
+                tooltip.style.visibility = 'visible';
+            } else {
+                tooltip.classList.add('hidden');
+            }
+        });
+        
+        canvas.addEventListener('mouseleave', () => {
+            tooltip.classList.add('hidden');
         });
     }
 
@@ -2250,6 +2804,66 @@ document.addEventListener('DOMContentLoaded', () => {
         totalUnconfirmedTeamReports, totalUnconfirmedEnemyReports) {
         chartInstances.forEach(chart => chart.destroy());
         chartInstances = [];
+
+        // Calculate and display total unique report counts for current match/selection
+        const totalFriendly = totalTeamReports;
+        const totalEnemy = totalEnemyReports;
+        const totalCombined = totalFriendly + totalEnemy;
+        
+        const reportSummary = document.getElementById('report-summary');
+        if (reportSummary && totalCombined > 0) {
+            document.getElementById('total-friendly-reports').textContent = totalFriendly;
+            document.getElementById('total-enemy-reports').textContent = totalEnemy;
+            document.getElementById('total-combined-reports').textContent = totalCombined;
+            reportSummary.style.display = 'block';
+        } else if (reportSummary) {
+            reportSummary.style.display = 'none';
+        }
+
+        // Calculate and display totals for all matches by summing unique reports received by the target Steam ID
+        let allMatchesFriendly = 0;
+        let allMatchesEnemy = 0;
+        
+        if (allMatchDataOriginal && allMatchDataOriginal.length > 0 && analysisSteamID) {
+            allMatchDataOriginal.forEach(match => {
+                // Filter reports to only count those targeting the analysis Steam ID
+                const targetReports = (match.reports || []).filter(r => {
+                    const targetSteamID = r.TargetSteamID ? String(r.TargetSteamID) : null;
+                    return targetSteamID === analysisSteamID;
+                });
+                
+                // Count unique reports by Slot (reporter slot) for the target player
+                const countedSlots = new Set();
+                let friendly = 0;
+                let enemy = 0;
+                
+                targetReports.forEach(report => {
+                    if (!countedSlots.has(report.Slot)) {
+                        countedSlots.add(report.Slot);
+                        if (report.Team === "FRIENDLY") {
+                            friendly++;
+                        } else {
+                            enemy++;
+                        }
+                    }
+                });
+                
+                allMatchesFriendly += friendly;
+                allMatchesEnemy += enemy;
+            });
+        }
+        
+        const allMatchesCombined = allMatchesFriendly + allMatchesEnemy;
+        
+        const allMatchesReportSummary = document.getElementById('all-matches-report-summary');
+        if (allMatchesReportSummary && allMatchesCombined > 0) {
+            document.getElementById('all-matches-friendly-reports').textContent = allMatchesFriendly;
+            document.getElementById('all-matches-enemy-reports').textContent = allMatchesEnemy;
+            document.getElementById('all-matches-combined-reports').textContent = allMatchesCombined;
+            allMatchesReportSummary.style.display = 'block';
+        } else if (allMatchesReportSummary) {
+            allMatchesReportSummary.style.display = 'none';
+        }
 
         const chartOptions = {
             responsive: true,

@@ -6,6 +6,9 @@ set -e
 # Still useful to keep if any other deps conflict, though we split them.
 export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
 
+echo "Cleaning old binaries..."
+rm -f bot server
+
 echo "Building bot..."
 go build -o bot ./cmd/bot
 
