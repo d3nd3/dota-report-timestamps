@@ -503,7 +503,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // Steam Login Elements
     const steamUserInput = document.getElementById('steam-user');
     const steamPassInput = document.getElementById('steam-pass');
-    const steamApiKeyInput = document.getElementById('steam-api-key');
     const steamCodeInput = document.getElementById('steam-code');
     const steamGuardGroup = document.getElementById('steam-guard-group');
     const steamLoginBtn = document.getElementById('steam-login-btn');
@@ -1073,13 +1072,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const savedSteamUser = localStorage.getItem('steamUser');
         const savedSteamPass = localStorage.getItem('steamPass');
         const savedSteamId = localStorage.getItem('steamId');
-        const savedSteamApiKey = localStorage.getItem('steamApiKey');
         
         if (savedReplayDir) replayDirInput.value = savedReplayDir;
         if (savedSteamUser) steamUserInput.value = savedSteamUser;
         if (savedSteamPass) steamPassInput.value = savedSteamPass;
         if (savedSteamId) steamIdInput.value = savedSteamId;
-        if (savedSteamApiKey) steamApiKeyInput.value = savedSteamApiKey;
     }
 
     // Save to localStorage
@@ -1088,7 +1085,6 @@ document.addEventListener('DOMContentLoaded', () => {
         if (steamUserInput.value) localStorage.setItem('steamUser', steamUserInput.value);
         if (steamPassInput.value) localStorage.setItem('steamPass', steamPassInput.value);
         if (steamIdInput.value) localStorage.setItem('steamId', steamIdInput.value);
-        if (steamApiKeyInput.value) localStorage.setItem('steamApiKey', steamApiKeyInput.value);
     }
 
     // Load from localStorage first (before server config)
@@ -1099,14 +1095,6 @@ document.addEventListener('DOMContentLoaded', () => {
         .then(res => res.json())
         .then(config => {
             replayDirInput.value = config.replayDir || '';
-            
-            // Only update steamApiKey if server has a non-empty value
-            // This preserves localStorage value if server returns empty string
-            if (config.steamApiKey && config.steamApiKey.trim() !== '') {
-                steamApiKeyInput.value = config.steamApiKey;
-                localStorage.setItem('steamApiKey', config.steamApiKey);
-            }
-            // If server returns empty/undefined, keep what was loaded from localStorage
 
             if (config.steamUser && config.steamUser.trim() !== '') {
                 steamUserInput.value = config.steamUser;
@@ -1128,21 +1116,17 @@ document.addEventListener('DOMContentLoaded', () => {
         const replayDir = replayDirInput.value.trim();
         const steamUser = steamUserInput.value.trim();
         const steamPass = steamPassInput.value.trim();
-        const steamApiKey = steamApiKeyInput.value.trim();
         
         if (replayDir) localStorage.setItem('replayDir', replayDir);
         if (steamUser) localStorage.setItem('steamUser', steamUser);
         if (steamPass) localStorage.setItem('steamPass', steamPass);
-        if (steamApiKey) localStorage.setItem('steamApiKey', steamApiKey);
         
-        // Auto-save to server after user stops typing (1 second delay)
         clearTimeout(saveTokenTimeout);
         saveTokenTimeout = setTimeout(() => {
             const payload = {};
             if (replayDir) payload.replayDir = replayDir;
             if (steamUser) payload.steamUser = steamUser;
             if (steamPass) payload.steamPass = steamPass;
-            if (steamApiKey) payload.steamApiKey = steamApiKey;
 
             if (Object.keys(payload).length > 0) {
                 fetchWithRetry('/api/config', {
@@ -1157,7 +1141,6 @@ document.addEventListener('DOMContentLoaded', () => {
     replayDirInput.addEventListener('input', autoSave);
     steamUserInput.addEventListener('input', autoSave);
     steamPassInput.addEventListener('input', autoSave);
-    steamApiKeyInput.addEventListener('input', autoSave);
     
     steamIdInput.addEventListener('input', () => {
         if (steamIdInput.value) localStorage.setItem('steamId', steamIdInput.value);
@@ -1172,7 +1155,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // Save Config
     saveConfigBtn.addEventListener('click', () => {
         const newDir = replayDirInput.value.trim();
-        const newApiKey = steamApiKeyInput.value.trim();
         const newSteamUser = steamUserInput.value.trim();
         const newSteamPass = steamPassInput.value.trim();
 
@@ -1180,7 +1162,6 @@ document.addEventListener('DOMContentLoaded', () => {
         
         const payload = {};
         if (newDir) payload.replayDir = newDir;
-        if (newApiKey) payload.steamApiKey = newApiKey;
         if (newSteamUser) payload.steamUser = newSteamUser;
         if (newSteamPass) payload.steamPass = newSteamPass;
         
@@ -1202,10 +1183,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (config.steamPass) {
                     localStorage.setItem('steamPass', config.steamPass);
                     steamPassInput.value = config.steamPass;
-                }
-                if (config.steamApiKey) {
-                    localStorage.setItem('steamApiKey', config.steamApiKey);
-                    steamApiKeyInput.value = config.steamApiKey;
                 }
                 alert('Configuration saved!');
                 browseDirectory(currentPath);
