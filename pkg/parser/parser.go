@@ -364,9 +364,8 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 
 	entityCounts := make(map[string]int)
 
-	lastHoverTick := make(map[int]int)    // reporter slot -> tick when hovered
-	lastHoverTarget := make(map[int]int)  // reporter slot -> target slot being hovered
-	firstHoverTarget := make(map[int]int) // reporter slot -> first target slot hovered (before moving cursor)
+	hoverDurations := make(map[int]map[int]int) // reporter slot -> target slot -> duration in ticks
+	lastHoverTime := make(map[int]int)          // reporter slot -> last tick any report button was hovered
 
 	heroMapByEntIndex := make(map[uint32]string)
 	heroMapByHandle := make(map[uint32]string)
@@ -558,98 +557,86 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 
 											for i := 0; i < 10; i++ {
 												if player_resources[i].SteamID == steamid {
+													// Initialize hover map for this reporter if needed
+													if _, ok := hoverDurations[i]; !ok {
+														hoverDurations[i] = make(map[int]int)
+													}
+
+													// Track hover duration
+													if targetSlot != -1 && targetSlot != i {
+														hoverDurations[i][targetSlot]++
+														lastHoverTime[i] = current_tick
+													}
+
 													inConfirmBox := xpos >= 956 && xpos <= 1170 && ypos >= 847 && ypos <= 888
 
 													if inConfirmBox {
-														if hoverTick, exists := lastHoverTick[i]; exists {
-															tickDiff := current_tick - hoverTick
-															if tickDiff >= 0 && tickDiff <= 120 {
-																firstTargetSlot, hasFirstTarget := firstHoverTarget[i]
-																lastTargetSlot, hasLastTarget := lastHoverTarget[i]
-
-																finalTargetSlot := firstTargetSlot
-																if !hasFirstTarget || firstTargetSlot < 0 || firstTargetSlot >= 10 || firstTargetSlot == i {
-																	if hasLastTarget && lastTargetSlot >= 0 && lastTargetSlot < 10 && lastTargetSlot != i {
-																		fmt.Printf("[PARSER] WARNING: First targetSlot %d is invalid/missing/self, using last targetSlot %d\n", firstTargetSlot, lastTargetSlot)
-																		finalTargetSlot = lastTargetSlot
-																	} else if targetSlot >= 0 && targetSlot < 10 && targetSlot != i {
-																		fmt.Printf("[PARSER] WARNING: First and last targetSlots invalid/self, using current targetSlot %d\n", targetSlot)
-																		finalTargetSlot = targetSlot
-																	} else {
-																		fmt.Printf("[PARSER] ERROR: All targetSlots are invalid/self (first: %d, last: %d, current: %d, reporter: %d), skipping\n", firstTargetSlot, lastTargetSlot, targetSlot, i)
-																		continue
+														if lastTick, exists := lastHoverTime[i]; exists {
+															tickDiff := current_tick - lastTick
+															if tickDiff >= 0 && tickDiff <= 120 { // 4 seconds window
+																// Find target with highest duration
+																bestTarget := -1
+																maxDuration := 0
+																for tSlot, duration := range hoverDurations[i] {
+																	if duration > maxDuration {
+																		maxDuration = duration
+																		bestTarget = tSlot
 																	}
 																}
 
-																if finalTargetSlot == i {
-																	fmt.Printf("[PARSER] ERROR: Final targetSlot %d is the same as reporter slot %d (self-report), skipping\n", finalTargetSlot, i)
-																	continue
-																}
+																if bestTarget != -1 && bestTarget != i {
+																	finalTargetSlot := bestTarget
 
-																if finalTargetSlot != firstTargetSlot && hasFirstTarget {
-																	fmt.Printf("[PARSER] WARNING: Using first targetSlot %d but it differs from stored first %d. This might indicate a bug.\n", finalTargetSlot, firstTargetSlot)
-																}
+																	if finalTargetSlot >= 0 && finalTargetSlot < 10 {
+																		targetSteamID := player_resources[finalTargetSlot].SteamID
+																		targetName := player_resources[finalTargetSlot].Name
+																		targetHero := player_resources[finalTargetSlot].Hero
 
-																if finalTargetSlot >= 0 && finalTargetSlot < 10 {
-																	targetSteamID := player_resources[finalTargetSlot].SteamID
-																	targetName := player_resources[finalTargetSlot].Name
-																	targetHero := player_resources[finalTargetSlot].Hero
-
-																	if targetSteamID == 0 {
-																		fmt.Printf("[PARSER] WARNING: Target slot %d has SteamID 0, trying to find SteamID from playerSteamIDs map\n", finalTargetSlot)
-																		if foundSteamID, exists := playerSteamIDs[finalTargetSlot]; exists && foundSteamID > 0 {
-																			targetSteamID = foundSteamID
-																			fmt.Printf("[PARSER] Found SteamID %d for slot %d from playerSteamIDs map\n", targetSteamID, finalTargetSlot)
-																		} else {
-																			fmt.Printf("[PARSER] ERROR: Could not find SteamID for target slot %d, skipping report\n", finalTargetSlot)
-																			continue
+																		if targetSteamID == 0 {
+																			if foundSteamID, exists := playerSteamIDs[finalTargetSlot]; exists && foundSteamID > 0 {
+																				targetSteamID = foundSteamID
+																			} else {
+																				continue
+																			}
 																		}
-																	}
 
-																	minutes, secs := ticksToMinutesAndSeconds(begin_tick, pausedTicks, hoverTick)
+																		minutes, secs := ticksToMinutesAndSeconds(begin_tick, pausedTicks, lastTick)
 
-																	var reportTeam string
-																	if team, okteam := e.GetUint64("m_iTeamNum"); okteam {
-																		reporterTeam := int(team)
-																		targetTeam := player_resources[finalTargetSlot].Team
-																		if targetTeam == int32(reporterTeam) {
-																			reportTeam = "FRIENDLY"
-																			teamReports += 1
-																		} else {
-																			reportTeam = "ENEMY"
-																			enemyReports += 1
+																		var reportTeam string
+																		if team, okteam := e.GetUint64("m_iTeamNum"); okteam {
+																			reporterTeam := int(team)
+																			targetTeam := player_resources[finalTargetSlot].Team
+																			if targetTeam == int32(reporterTeam) {
+																				reportTeam = "FRIENDLY"
+																				teamReports += 1
+																			} else {
+																				reportTeam = "ENEMY"
+																				enemyReports += 1
+																			}
 																		}
-																	}
 
-																	newReport := &Report{
-																		Time:          fmt.Sprintf("%02d:%02d", minutes, secs),
-																		SteamID:       steamid,
-																		Slot:          i,
-																		Name:          name,
-																		Team:          reportTeam,
-																		Hero:          player_resources[i].Hero,
-																		TargetSlot:    finalTargetSlot,
-																		TargetSteamID: targetSteamID,
-																		TargetName:    targetName,
-																		TargetHero:    targetHero,
-																	}
+																		newReport := &Report{
+																			Time:          fmt.Sprintf("%02d:%02d", minutes, secs),
+																			SteamID:       steamid,
+																			Slot:          i,
+																			Name:          name,
+																			Team:          reportTeam,
+																			Hero:          player_resources[i].Hero,
+																			TargetSlot:    finalTargetSlot,
+																			TargetSteamID: targetSteamID,
+																			TargetName:    targetName,
+																			TargetHero:    targetHero,
+																		}
 
-																	reports = append(reports, newReport)
-																	delete(lastHoverTick, i)
-																	delete(lastHoverTarget, i)
-																	delete(firstHoverTarget, i)
+																		reports = append(reports, newReport)
+
+																		// Reset tracking
+																		delete(hoverDurations, i)
+																		delete(lastHoverTime, i)
+																	}
 																}
 															}
 														}
-													}
-
-													if targetSlot != -1 && targetSlot != i {
-														firstTarget, hadFirstTarget := firstHoverTarget[i]
-														if !hadFirstTarget || firstTarget < 0 || firstTarget >= 10 || firstTarget == i {
-															firstHoverTarget[i] = targetSlot
-														}
-														lastHoverTick[i] = current_tick
-														lastHoverTarget[i] = targetSlot
 													}
 													break
 												}
