@@ -185,7 +185,10 @@ const DOTA_HEROES = [
     
     const heroNameVariations = {
         'zuus': 'zeus',
-        'zeus': 'zuus'
+        'zeus': 'zuus',
+        'anti_mage': 'antimage',
+        'vengeful_spirit': 'vengefulspirit',
+        'queen_of_pain': 'queenofpain'
     };
     
     let heroNameNormalized = normalizeHeroName(heroName);
@@ -2721,6 +2724,9 @@ document.addEventListener('DOMContentLoaded', () => {
         });
         
         const matchLabels = allMatchDataOriginal.map(m => `Match ${m.matchID}`);
+        
+        matchLabels.reverse();
+        reportsPerMatch.reverse();
         
         if (playerReportsPerMatchChart) {
             playerReportsPerMatchChart.destroy();

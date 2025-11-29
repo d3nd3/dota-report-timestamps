@@ -115,7 +115,7 @@ func isReportButton(x int, y int, aspect float32) int {
 	score_width := int(math.Round(float64((1.77777777778 * (920.0 / 1920)) / float64(aspect) * 1920)))
 	score_width_no_tips := int(math.Round(float64((1.77777777778 * (820.0 / 1920)) / float64(aspect) * 1920)))
 
-	lower_x_bound := 865.0
+	lower_x_bound := 866.0
 	upper_x_bound := 893.0
 
 	lower_x_bound_r := lower_x_bound / 920
@@ -125,25 +125,25 @@ func isReportButton(x int, y int, aspect float32) int {
 	upper_x_bound_no_tips_r := (upper_x_bound - 100) / 820
 
 	if (x >= int(math.Floor(float64(lower_x_bound_no_tips_r*float64(score_width_no_tips)))) && x <= int(math.Ceil(float64(upper_x_bound_no_tips_r*float64(score_width_no_tips))))) || (x >= int(math.Floor(float64(lower_x_bound_r*float64(score_width)))) && x <= int(math.Ceil(float64(upper_x_bound_r*float64(score_width))))) /*|| ( x >= 658 && x <= 679 )*/ {
-		if y >= 106 && y <= 134 { //120+70x
+		if y >= 106 && y <= 135 {
 			return 0
-		} else if y >= 176 && y <= 204 {
+		} else if y >= 176 && y <= 205 {
 			return 1
-		} else if y >= 246 && y <= 274 {
+		} else if y >= 246 && y <= 275 {
 			return 2
-		} else if y >= 316 && y <= 344 {
+		} else if y >= 316 && y <= 345 {
 			return 3
-		} else if y >= 386 && y <= 414 {
+		} else if y >= 386 && y <= 415 {
 			return 4
-		} else if y >= 486 && y <= 514 {
+		} else if y >= 488 && y <= 517 {
 			return 5
-		} else if y >= 556 && y <= 584 {
+		} else if y >= 558 && y <= 587 {
 			return 6
-		} else if y >= 626 && y <= 654 {
+		} else if y >= 628 && y <= 657 {
 			return 7
-		} else if y >= 696 && y <= 724 {
+		} else if y >= 698 && y <= 727 {
 			return 8
-		} else if y >= 766 && y <= 794 {
+		} else if y >= 768 && y <= 797 {
 			return 9
 		}
 	}
@@ -364,8 +364,9 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 
 	entityCounts := make(map[string]int)
 
-	hoverDurations := make(map[int]map[int]int) // reporter slot -> target slot -> duration in ticks
-	lastHoverTime := make(map[int]int)          // reporter slot -> last tick any report button was hovered
+	hoverDurations := make(map[int]map[int]int)      // reporter slot -> target slot -> duration in ticks
+	lastHoverTime := make(map[int]int)               // reporter slot -> last tick any report button was hovered
+	targetLastHoverTime := make(map[int]map[int]int) // reporter slot -> target slot -> last tick this target was hovered
 
 	heroMapByEntIndex := make(map[uint32]string)
 	heroMapByHandle := make(map[uint32]string)
@@ -543,107 +544,148 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 				if name, ok3 := e.GetString("m_iszPlayerName"); ok3 {
 					parseAllReports := (actualReportedSlot == -1 && actualReportedSteamID == 0)
 					if parseAllReports || steamid != actualReportedSteamID {
-						if statsPanel, ok := e.GetInt32("m_iStatsPanel"); ok {
-							if statsPanel == 1 {
-								if !scoreboardOpen[steamid] {
-								}
-								if xpos, xposok := e.GetInt32("m_iCursor.0000"); xposok {
-									if ypos, yposok := e.GetInt32("m_iCursor.0001"); yposok {
-										xpos = int32(math.Round(float64(xpos) / 510 * 1920))
-										ypos = int32(math.Round(float64(ypos) / 383 * 1080))
+						statsPanel, statsPanelOk := e.GetInt32("m_iStatsPanel")
+						if xpos, xposok := e.GetInt32("m_iCursor.0000"); xposok {
+							if ypos, yposok := e.GetInt32("m_iCursor.0001"); yposok {
+								xpos = int32(math.Round(float64(xpos) / 510 * 1920))
+								ypos = int32(math.Round(float64(ypos) / 383 * 1080))
 
-										if aspect, aspectok := e.GetFloat32("m_flAspectRatio"); aspectok {
-											targetSlot := isReportButton(int(xpos), int(ypos), aspect)
+								if aspect, aspectok := e.GetFloat32("m_flAspectRatio"); aspectok {
+									targetSlot := isReportButton(int(xpos), int(ypos), aspect)
 
-											for i := 0; i < 10; i++ {
-												if player_resources[i].SteamID == steamid {
-													// Initialize hover map for this reporter if needed
-													if _, ok := hoverDurations[i]; !ok {
-														hoverDurations[i] = make(map[int]int)
-													}
+									for i := 0; i < 10; i++ {
+										if player_resources[i].SteamID == steamid {
+											// Initialize hover map for this reporter if needed
+											if _, ok := hoverDurations[i]; !ok {
+												hoverDurations[i] = make(map[int]int)
+											}
+											if _, ok := targetLastHoverTime[i]; !ok {
+												targetLastHoverTime[i] = make(map[int]int)
+											}
 
-													// Track hover duration
-													if targetSlot != -1 && targetSlot != i {
-														hoverDurations[i][targetSlot]++
-														lastHoverTime[i] = current_tick
-													}
+											// Track hover duration (only when scoreboard is open)
+											if statsPanelOk && statsPanel == 1 {
+												if targetSlot != -1 && targetSlot != i {
+													hoverDurations[i][targetSlot]++
+													lastHoverTime[i] = current_tick
+													targetLastHoverTime[i][targetSlot] = current_tick
+												}
+											}
 
-													inConfirmBox := xpos >= 956 && xpos <= 1170 && ypos >= 847 && ypos <= 888
+											// Check confirm box (independent of scoreboard state)
+											inConfirmBox := xpos >= 968 && xpos <= 1159 && ypos >= 844 && ypos <= 889
 
-													if inConfirmBox {
-														if lastTick, exists := lastHoverTime[i]; exists {
-															tickDiff := current_tick - lastTick
-															if tickDiff >= 0 && tickDiff <= 120 { // 4 seconds window
-																// Find target with highest duration
-																bestTarget := -1
-																maxDuration := 0
-																for tSlot, duration := range hoverDurations[i] {
-																	if duration > maxDuration {
-																		maxDuration = duration
-																		bestTarget = tSlot
-																	}
-																}
+											if inConfirmBox {
+												if lastTick, exists := lastHoverTime[i]; exists {
+													tickDiff := current_tick - lastTick
+													if tickDiff >= 0 && tickDiff <= 120 {
+														bestTarget := -1
+														maxScore := 0.0
+														mostRecentHoverTime := -1
 
-																if bestTarget != -1 && bestTarget != i {
-																	finalTargetSlot := bestTarget
-
-																	if finalTargetSlot >= 0 && finalTargetSlot < 10 {
-																		targetSteamID := player_resources[finalTargetSlot].SteamID
-																		targetName := player_resources[finalTargetSlot].Name
-																		targetHero := player_resources[finalTargetSlot].Hero
-
-																		if targetSteamID == 0 {
-																			if foundSteamID, exists := playerSteamIDs[finalTargetSlot]; exists && foundSteamID > 0 {
-																				targetSteamID = foundSteamID
-																			} else {
-																				continue
-																			}
-																		}
-
-																		minutes, secs := ticksToMinutesAndSeconds(begin_tick, pausedTicks, lastTick)
-
-																		var reportTeam string
-																		if team, okteam := e.GetUint64("m_iTeamNum"); okteam {
-																			reporterTeam := int(team)
-																			targetTeam := player_resources[finalTargetSlot].Team
-																			if targetTeam == int32(reporterTeam) {
-																				reportTeam = "FRIENDLY"
-																				teamReports += 1
-																			} else {
-																				reportTeam = "ENEMY"
-																				enemyReports += 1
-																			}
-																		}
-
-																		newReport := &Report{
-																			Time:          fmt.Sprintf("%02d:%02d", minutes, secs),
-																			SteamID:       steamid,
-																			Slot:          i,
-																			Name:          name,
-																			Team:          reportTeam,
-																			Hero:          player_resources[i].Hero,
-																			TargetSlot:    finalTargetSlot,
-																			TargetSteamID: targetSteamID,
-																			TargetName:    targetName,
-																			TargetHero:    targetHero,
-																		}
-
-																		reports = append(reports, newReport)
-
-																		// Reset tracking
-																		delete(hoverDurations, i)
-																		delete(lastHoverTime, i)
+														for tSlot := range hoverDurations[i] {
+															if targetHoverTime, exists := targetLastHoverTime[i][tSlot]; exists {
+																targetTickDiff := lastTick - targetHoverTime
+																if targetTickDiff >= 0 && targetTickDiff <= 120 {
+																	if targetHoverTime > mostRecentHoverTime {
+																		mostRecentHoverTime = targetHoverTime
 																	}
 																}
 															}
 														}
+
+														durationWeight := 0.7
+														recencyWeight := 0.3
+
+														minHoverDuration := 4
+														for tSlot, duration := range hoverDurations[i] {
+															if duration >= minHoverDuration {
+																if targetHoverTime, exists := targetLastHoverTime[i][tSlot]; exists {
+																	targetTickDiff := lastTick - targetHoverTime
+																	if targetTickDiff >= 0 && targetTickDiff <= 120 {
+																		isLastHovered := 0
+																		if targetHoverTime == mostRecentHoverTime {
+																			isLastHovered = 1
+																		}
+																		score := float64(duration)*durationWeight + float64(isLastHovered)*recencyWeight*5.0
+																		if score > maxScore {
+																			maxScore = score
+																			bestTarget = tSlot
+																		}
+																	}
+																}
+															}
+														}
+
+														if bestTarget != -1 && bestTarget != i {
+															finalTargetSlot := bestTarget
+
+															if finalTargetSlot >= 0 && finalTargetSlot < 10 {
+																targetSteamID := player_resources[finalTargetSlot].SteamID
+																targetName := player_resources[finalTargetSlot].Name
+																targetHero := player_resources[finalTargetSlot].Hero
+
+																if targetSteamID == 0 {
+																	if foundSteamID, exists := playerSteamIDs[finalTargetSlot]; exists && foundSteamID > 0 {
+																		targetSteamID = foundSteamID
+																	} else {
+																		continue
+																	}
+																}
+
+																minutes, secs := ticksToMinutesAndSeconds(begin_tick, pausedTicks, lastTick)
+
+																var reportTeam string
+																if team, okteam := e.GetUint64("m_iTeamNum"); okteam {
+																	reporterTeam := int(team)
+																	targetTeam := player_resources[finalTargetSlot].Team
+																	if targetTeam == int32(reporterTeam) {
+																		reportTeam = "FRIENDLY"
+																		teamReports += 1
+																	} else {
+																		reportTeam = "ENEMY"
+																		enemyReports += 1
+																	}
+																}
+
+																newReport := &Report{
+																	Time:          fmt.Sprintf("%02d:%02d", minutes, secs),
+																	SteamID:       steamid,
+																	Slot:          i,
+																	Name:          name,
+																	Team:          reportTeam,
+																	Hero:          player_resources[i].Hero,
+																	TargetSlot:    finalTargetSlot,
+																	TargetSteamID: targetSteamID,
+																	TargetName:    targetName,
+																	TargetHero:    targetHero,
+																}
+
+																reports = append(reports, newReport)
+
+																delete(hoverDurations, i)
+																delete(lastHoverTime, i)
+																delete(targetLastHoverTime, i)
+															}
+														}
 													}
-													break
+												}
+											} else if lastTick, exists := lastHoverTime[i]; exists {
+												if current_tick-lastTick > 120 {
+													delete(hoverDurations, i)
+													delete(lastHoverTime, i)
+													delete(targetLastHoverTime, i)
 												}
 											}
+											break
 										}
 									}
 								}
+							}
+						}
+
+						if statsPanel, ok := e.GetInt32("m_iStatsPanel"); ok {
+							if statsPanel == 1 {
 								scoreboardOpen[steamid] = true
 							} else if statsPanel == 0 {
 								scoreboardOpen[steamid] = false

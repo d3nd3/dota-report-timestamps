@@ -1135,6 +1135,7 @@ func handleHeroIcon(w http.ResponseWriter, r *http.Request) {
 		"ringmaster":   true,
 		"marci":        true,
 		"muerta":       true,
+		"dawnbreaker": true,
 	}
 
 	var iconUrl string
@@ -1162,7 +1163,7 @@ func handleHeroIcon(w http.ResponseWriter, r *http.Request) {
 			resp2, err2 := client.Get(fullUrl)
 			if err2 != nil {
 				log.Printf("Failed to fetch hero full image %s: %v", fullUrl, err2)
-				http.Error(w, fmt.Sprintf("Failed to fetch icon: status %d", resp.StatusCode), http.StatusInternalServerError)
+				http.Error(w, fmt.Sprintf("Failed to fetch icon: status %d", resp.StatusCode), http.StatusNotFound)
 				return
 			}
 			defer resp2.Body.Close()
@@ -1174,7 +1175,7 @@ func handleHeroIcon(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Printf("Hero full image %s also returned status %d", fullUrl, resp2.StatusCode)
 		}
-		http.Error(w, fmt.Sprintf("Failed to fetch icon: status %d", resp.StatusCode), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Hero icon not found"), http.StatusNotFound)
 		return
 	}
 
