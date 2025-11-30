@@ -597,7 +597,7 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 														durationWeight := 0.7
 														recencyWeight := 0.3
 
-														minHoverDuration := 4
+														minHoverDuration := 2
 														for tSlot, duration := range hoverDurations[i] {
 															if duration >= minHoverDuration {
 																if targetHoverTime, exists := targetLastHoverTime[i][tSlot]; exists {
