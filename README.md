@@ -19,7 +19,6 @@ I am very interested to see what other people learn! 🧐 This tool helps you ef
 *   **Deep Insights** 📊: See who reported whom, when, and confirmed vs. unconfirmed reports.
 
 ![Graphs](assets/showcase/graph.png)
-![More Graphs](assets/showcase/moregraphs.png)
 
 ## 🚀 How to Install & Use
 
