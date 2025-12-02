@@ -15,7 +15,11 @@ echo Building release binaries for all platforms...
 echo.
 
 set DIST_DIR=dist
-if exist "%DIST_DIR%" rmdir /s /q "%DIST_DIR%"
+if exist "%DIST_DIR%\nul" rmdir /s /q "%DIST_DIR%"
+if exist "%DIST_DIR%" (
+    echo ERROR: %DIST_DIR% exists but is not a directory!
+    exit /b 1
+)
 mkdir "%DIST_DIR%"
 mkdir "%DIST_DIR%\windows"
 mkdir "%DIST_DIR%\mac"
