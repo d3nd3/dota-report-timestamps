@@ -42,6 +42,7 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Build binaries
+        shell: bash
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -85,7 +86,13 @@ jobs:
           cp QUICKSTART.txt "$PACKAGE_DIR/README.txt"
           
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            7z a -tzip "dota-report-timestamps-${{ matrix.suffix }}-${VERSION}.zip" "$PACKAGE_DIR"/*
+            if command -v 7z &> /dev/null; then
+              7z a -tzip "dota-report-timestamps-${{ matrix.suffix }}-${VERSION}.zip" "$PACKAGE_DIR"/*
+            else
+              cd "$PACKAGE_DIR"
+              zip -r "../dota-report-timestamps-${{ matrix.suffix }}-${VERSION}.zip" .
+              cd ..
+            fi
           else
             zip -r "dota-report-timestamps-${{ matrix.suffix }}-${VERSION}.zip" "$PACKAGE_DIR"
           fi
