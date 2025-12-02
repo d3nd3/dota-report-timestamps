@@ -2,8 +2,6 @@
 
 **Unlock the psychology behind player reports.** 🧠
 
-![Conduct Card](assets/showcase/conduct_card.png)
-
 ## ⚠️ The Problem
 The report system in Dota 2 is **deeply flawed**. It's often used as a rage button rather than a tool for justice. 😡
 
@@ -38,3 +36,7 @@ It is super simple to get started!
 
 That's it! You are ready to analyze your replays. Happy hunting! 🏹
 
+
+
+---
+![Conduct Card](assets/showcase/conduct_card.png)
