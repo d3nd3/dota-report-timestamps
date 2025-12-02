@@ -1,0 +1,55 @@
+========================================
+Dota 2 Report Timestamp Tool - Quick Start
+========================================
+
+HOW TO USE THIS TOOL (3 SIMPLE STEPS):
+
+1. EXTRACT THIS ZIP FILE
+   - Right-click the zip file and choose "Extract All" (Windows)
+   - Or double-click to open and drag the folder out (Mac/Linux)
+   - Make sure all files are extracted (you should see bot.exe, server.exe, 
+     launch-windows.bat, and folders like "static" and "assets")
+
+2. DOUBLE-CLICK THE LAUNCHER
+   - Windows: Double-click "launch-windows.bat"
+   - Mac: Double-click "launch-mac.sh" (or open Terminal, go to this folder, 
+     and type: ./launch-mac.sh)
+   - Linux: Open Terminal, go to this folder, and type: ./launch-linux.sh
+
+3. USE THE TOOL IN YOUR BROWSER
+   - Your browser should open automatically to http://localhost:8081
+   - If it doesn't, open your browser and go to: http://localhost:8081
+   - Log in with your Steam account through the web interface
+   - Start analyzing your replays!
+
+IMPORTANT NOTES:
+
+- Keep the launcher window open while using the tool. If you close it, 
+  the tool will stop working.
+
+- To stop the tool, go back to the launcher window and press Ctrl+C 
+  (or just close the window).
+
+- You need a Steam account to use this tool. Log in through the web 
+  interface - your credentials are only sent to Steam, not stored by 
+  this tool.
+
+TROUBLESHOOTING:
+
+If you get an error saying the bot or server executable is missing:
+- Make sure you extracted ALL files from the zip
+- Don't delete any files from this folder
+
+If the browser doesn't open automatically:
+- Just open your browser manually and go to: http://localhost:8081
+
+If port 8081 is already in use:
+- Close any other programs using that port
+- Or restart your computer and try again
+
+For more help, visit: https://github.com/d3nd3/dota-report-timestamps
+
+========================================
+Happy hunting! 🏹
+========================================
+

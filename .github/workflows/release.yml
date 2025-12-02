@@ -1,0 +1,146 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            launcher: launch-linux.sh
+            suffix: linux
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            launcher: launch-windows.bat
+            suffix: windows
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            launcher: launch-mac.sh
+            suffix: mac
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            launcher: launch-mac.sh
+            suffix: mac-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build binaries
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOLANG_PROTOBUF_REGISTRATION_CONFLICT: warn
+        run: |
+          go build -ldflags="-s -w" -o bot ./cmd/bot
+          go build -ldflags="-s -w" -o server ./cmd/server
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            mv bot bot.exe
+            mv server server.exe
+          fi
+
+      - name: Prepare release package
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          PACKAGE_DIR="dota-report-timestamps-${{ matrix.suffix }}"
+          mkdir -p "$PACKAGE_DIR"
+          
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            cp bot.exe "$PACKAGE_DIR/"
+            cp server.exe "$PACKAGE_DIR/"
+            cp launch-windows.bat "$PACKAGE_DIR/"
+          else
+            if [ "${{ matrix.goarch }}" = "arm64" ]; then
+              mv bot bot-arm64
+              mv server server-arm64
+              cp bot-arm64 "$PACKAGE_DIR/"
+              cp server-arm64 "$PACKAGE_DIR/"
+            else
+              cp bot "$PACKAGE_DIR/"
+              cp server "$PACKAGE_DIR/"
+            fi
+            cp ${{ matrix.launcher }} "$PACKAGE_DIR/"
+            chmod +x "$PACKAGE_DIR"/*
+          fi
+          
+          cp -r cmd/server/static "$PACKAGE_DIR/"
+          mkdir -p "$PACKAGE_DIR/assets"
+          cp -r assets/portraits "$PACKAGE_DIR/assets/"
+          cp QUICKSTART.txt "$PACKAGE_DIR/README.txt"
+          
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            7z a -tzip "dota-report-timestamps-${{ matrix.suffix }}-${VERSION}.zip" "$PACKAGE_DIR"/*
+          else
+            zip -r "dota-report-timestamps-${{ matrix.suffix }}-${VERSION}.zip" "$PACKAGE_DIR"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.suffix }}
+          path: dota-report-timestamps-${{ matrix.suffix }}-*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Combine Mac packages
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/}
+          cd artifacts
+          mkdir -p mac-combined
+          unzip -q release-mac/dota-report-timestamps-mac-*.zip -d mac-combined
+          unzip -q release-mac-arm64/dota-report-timestamps-mac-arm64-*.zip -d mac-combined
+          cd mac-combined
+          DIR=$(find . -name "dota-report-timestamps-mac*" -type d | head -1)
+          if [ -n "$DIR" ]; then
+            cp -r "$DIR"/* .
+            rm -rf "$DIR"
+          fi
+          DIR=$(find . -name "dota-report-timestamps-mac-arm64*" -type d | head -1)
+          if [ -n "$DIR" ]; then
+            cp "$DIR"/bot-arm64 . 2>/dev/null || true
+            cp "$DIR"/server-arm64 . 2>/dev/null || true
+            rm -rf "$DIR"
+          fi
+          zip -r "../dota-report-timestamps-mac-${VERSION}.zip" .
+          cd ..
+          rm -rf mac-combined release-mac release-mac-arm64
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/dota-report-timestamps-windows-*.zip
+            artifacts/dota-report-timestamps-mac-*.zip
+            artifacts/dota-report-timestamps-linux-*.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
