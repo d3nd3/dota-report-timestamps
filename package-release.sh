@@ -2,6 +2,14 @@
 
 set -e
 
+cd "$(dirname "$0")"
+
+if [ ! -f "go.mod" ]; then
+    echo "ERROR: go.mod not found!"
+    echo "Please run this script from the repository root directory."
+    exit 1
+fi
+
 if [ ! -d "dist" ]; then
     echo "ERROR: dist/ directory not found!"
     echo "Please run build-release.sh first to build the binaries."

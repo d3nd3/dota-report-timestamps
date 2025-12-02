@@ -1,6 +1,14 @@
 @echo off
 setlocal enabledelayedexpansion
 
+cd /d "%~dp0"
+
+if not exist "go.mod" (
+    echo ERROR: go.mod not found!
+    echo Please run this script from the repository root directory.
+    exit /b 1
+)
+
 set GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
 
 echo Building release binaries for all platforms...

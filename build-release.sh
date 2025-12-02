@@ -2,6 +2,14 @@
 
 set -e
 
+cd "$(dirname "$0")"
+
+if [ ! -f "go.mod" ]; then
+    echo "ERROR: go.mod not found!"
+    echo "Please run this script from the repository root directory."
+    exit 1
+fi
+
 export GOLANG_PROTOBUF_REGISTRATION_CONFLICT=warn
 
 echo "Building release binaries for all platforms..."
