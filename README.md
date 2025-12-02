@@ -37,5 +37,5 @@ It is super simple to get started!
     ```
 4.  **Open your browser**: Go to `http://localhost:8081` 🌐
 
-That's it! You are ready to analyze. Happy hunting! 🏹
+That's it! You are ready to analyze your replays. Happy hunting! 🏹
 
