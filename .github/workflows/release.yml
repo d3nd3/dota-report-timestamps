@@ -116,37 +116,51 @@ jobs:
         with:
           path: artifacts
 
-      - name: Combine Mac packages
+      - name: Prepare release files
         shell: bash
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          cd artifacts
-          mkdir -p mac-combined
-          unzip -q release-mac/dota-report-timestamps-mac-*.zip -d mac-combined
-          unzip -q release-mac-arm64/dota-report-timestamps-mac-arm64-*.zip -d mac-combined
-          cd mac-combined
-          DIR=$(find . -name "dota-report-timestamps-mac*" -type d | head -1)
-          if [ -n "$DIR" ]; then
-            cp -r "$DIR"/* .
-            rm -rf "$DIR"
+          mkdir -p release-files
+          
+          if [ -d "artifacts/release-windows" ]; then
+            cp artifacts/release-windows/*.zip release-files/ || true
           fi
-          DIR=$(find . -name "dota-report-timestamps-mac-arm64*" -type d | head -1)
-          if [ -n "$DIR" ]; then
-            cp "$DIR"/bot-arm64 . 2>/dev/null || true
-            cp "$DIR"/server-arm64 . 2>/dev/null || true
-            rm -rf "$DIR"
+          
+          if [ -d "artifacts/release-linux" ]; then
+            cp artifacts/release-linux/*.zip release-files/ || true
           fi
-          zip -r "../dota-report-timestamps-mac-${VERSION}.zip" .
-          cd ..
-          rm -rf mac-combined release-mac release-mac-arm64
+          
+          if [ -d "artifacts/release-mac" ] || [ -d "artifacts/release-mac-arm64" ]; then
+            mkdir -p mac-combined
+            if [ -d "artifacts/release-mac" ]; then
+              unzip -q artifacts/release-mac/dota-report-timestamps-mac-*.zip -d mac-combined || true
+            fi
+            if [ -d "artifacts/release-mac-arm64" ]; then
+              unzip -q artifacts/release-mac-arm64/dota-report-timestamps-mac-arm64-*.zip -d mac-combined || true
+            fi
+            cd mac-combined
+            DIR=$(find . -name "dota-report-timestamps-mac*" -type d | head -1)
+            if [ -n "$DIR" ]; then
+              cp -r "$DIR"/* . 2>/dev/null || true
+              rm -rf "$DIR"
+            fi
+            DIR=$(find . -name "dota-report-timestamps-mac-arm64*" -type d | head -1)
+            if [ -n "$DIR" ]; then
+              cp "$DIR"/bot-arm64 . 2>/dev/null || true
+              cp "$DIR"/server-arm64 . 2>/dev/null || true
+              rm -rf "$DIR"
+            fi
+            zip -r "../release-files/dota-report-timestamps-mac-${VERSION}.zip" .
+            cd ..
+            rm -rf mac-combined
+          fi
+          
+          ls -la release-files/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          files: |
-            artifacts/dota-report-timestamps-windows-*.zip
-            artifacts/dota-report-timestamps-mac-*.zip
-            artifacts/dota-report-timestamps-linux-*.zip
+          files: release-files/*.zip
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
