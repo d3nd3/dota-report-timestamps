@@ -558,6 +558,21 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log('Calling browseDirectory with profileName:', profileName);
         browseDirectory('', profileName);
     });
+    
+    let replayDirChangeTimeout;
+    replayDirInput.addEventListener('change', () => {
+        clearTimeout(replayDirChangeTimeout);
+        replayDirChangeTimeout = setTimeout(() => {
+            const profileName = getSelectedProfileName();
+            browseDirectory(currentPath, profileName);
+        }, 300);
+    });
+    
+    replayDirInput.addEventListener('blur', () => {
+        clearTimeout(replayDirChangeTimeout);
+        const profileName = getSelectedProfileName();
+        browseDirectory(currentPath, profileName);
+    });
 
     function getSelectedProfileName() {
         const index = profileSelect.value;
