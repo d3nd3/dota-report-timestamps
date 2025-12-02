@@ -563,15 +563,45 @@ document.addEventListener('DOMContentLoaded', () => {
     replayDirInput.addEventListener('change', () => {
         clearTimeout(replayDirChangeTimeout);
         replayDirChangeTimeout = setTimeout(() => {
-            const profileName = getSelectedProfileName();
-            browseDirectory(currentPath, profileName);
-        }, 300);
+            saveToStorage();
+            const newDir = replayDirInput.value.trim();
+            if (newDir) {
+                fetchWithRetry('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ replayDir: newDir })
+                }, 2, 1000)
+                    .then(() => {
+                        const profileName = getSelectedProfileName();
+                        browseDirectory(currentPath, profileName);
+                    })
+                    .catch(err => console.error('Error saving replay directory:', err));
+            } else {
+                const profileName = getSelectedProfileName();
+                browseDirectory(currentPath, profileName);
+            }
+        }, 500);
     });
     
     replayDirInput.addEventListener('blur', () => {
         clearTimeout(replayDirChangeTimeout);
-        const profileName = getSelectedProfileName();
-        browseDirectory(currentPath, profileName);
+        saveToStorage();
+        const newDir = replayDirInput.value.trim();
+        if (newDir) {
+            fetchWithRetry('/api/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ replayDir: newDir })
+            }, 2, 1000)
+                .then(() => {
+                    const profileName = getSelectedProfileName();
+                    browseDirectory(currentPath, profileName);
+                })
+                .catch(err => console.error('Error saving replay directory:', err));
+        } else {
+            const profileName = getSelectedProfileName();
+            browseDirectory(currentPath, profileName);
+        }
     });
 
     function getSelectedProfileName() {
