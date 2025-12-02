@@ -26,6 +26,29 @@ var gcClient *botclient.Client
 var downloadLocks sync.Map // Map[int64]*sync.Mutex to prevent concurrent downloads of the same match
 var handlerLocks sync.Map // Map[int64]*sync.Mutex to prevent concurrent handler execution for the same match
 
+func findStaticDir() string {
+	possibleDirs := []string{
+		"./cmd/server/static",
+		"./static",
+	}
+	
+	execPath, err := os.Executable()
+	if err == nil {
+		execDir := filepath.Dir(execPath)
+		possibleDirs = append(possibleDirs, filepath.Join(execDir, "static"))
+		possibleDirs = append(possibleDirs, filepath.Join(execDir, "cmd", "server", "static"))
+	}
+	
+	for _, dir := range possibleDirs {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			if _, err := os.Stat(filepath.Join(dir, "index.html")); err == nil {
+				return dir
+			}
+		}
+	}
+	return ""
+}
+
 func noCacheJS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, ".js") {
@@ -67,8 +90,15 @@ func main() {
 		}()
 	}
 
+	// Find static files directory (check multiple possible locations)
+	staticDir := findStaticDir()
+	if staticDir == "" {
+		log.Fatal("Could not find static files directory. Tried: ./cmd/server/static, ./static")
+	}
+	log.Printf("Serving static files from: %s", staticDir)
+	
 	// Serve static files
-	fs := http.FileServer(http.Dir("./cmd/server/static"))
+	fs := http.FileServer(http.Dir(staticDir))
 	http.Handle("/", noCacheJS(fs))
 
 	// API endpoints
