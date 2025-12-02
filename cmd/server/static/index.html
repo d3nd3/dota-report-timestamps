@@ -34,8 +34,11 @@
                     </div>
                     <div class="card-body">
                         <div class="input-group">
-                            <label for="replay-dir">Replay Directory</label>
-                            <input type="text" id="replay-dir" placeholder="/path/to/replays/">
+                            <label for="replay-dir">Replay Directory (Base Path)</label>
+                            <input type="text" id="replay-dir" placeholder="/path/to/dota/replays/">
+                            <small style="color: #666; display: block; margin-top: 5px;">
+                                Set this to your Dota 2 replays folder. If you select a profile, replays will be looked for in: <code>{base}/ProfileName/</code>
+                            </small>
                         </div>
                         <div class="input-group">
                             <label for="profile-select">Steam Profiles</label>
@@ -141,6 +144,7 @@
                     <div class="card-header">
                         <h2>Local Replays</h2>
                         <div class="header-controls">
+                            <div id="current-path" style="font-size: 0.85em; color: #666; margin-right: 10px; font-family: monospace;"></div>
                             <button id="browse-back" class="btn text-btn" style="display: none;">← Back</button>
                             <button id="refresh-replays" class="btn icon-btn" title="Refresh">↻</button>
                         </div>

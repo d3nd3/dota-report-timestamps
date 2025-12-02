@@ -556,10 +556,15 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         console.log('Calling browseDirectory with profileName:', profileName);
+        updatePathDisplay('', profileName);
         browseDirectory('', profileName);
     });
     
     let replayDirChangeTimeout;
+    replayDirInput.addEventListener('input', () => {
+        updatePathDisplay(currentPath, getSelectedProfileName());
+    });
+    
     replayDirInput.addEventListener('change', () => {
         clearTimeout(replayDirChangeTimeout);
         replayDirChangeTimeout = setTimeout(() => {
@@ -573,11 +578,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 }, 2, 1000)
                     .then(() => {
                         const profileName = getSelectedProfileName();
+                        updatePathDisplay(currentPath, profileName);
                         browseDirectory(currentPath, profileName);
                     })
                     .catch(err => console.error('Error saving replay directory:', err));
             } else {
                 const profileName = getSelectedProfileName();
+                updatePathDisplay(currentPath, profileName);
                 browseDirectory(currentPath, profileName);
             }
         }, 500);
@@ -595,11 +602,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }, 2, 1000)
                 .then(() => {
                     const profileName = getSelectedProfileName();
+                    updatePathDisplay(currentPath, profileName);
                     browseDirectory(currentPath, profileName);
                 })
                 .catch(err => console.error('Error saving replay directory:', err));
         } else {
             const profileName = getSelectedProfileName();
+            updatePathDisplay(currentPath, profileName);
             browseDirectory(currentPath, profileName);
         }
     });
@@ -1218,6 +1227,7 @@ document.addEventListener('DOMContentLoaded', () => {
         .then(res => res.json())
         .then(config => {
             replayDirInput.value = config.replayDir || '';
+            updatePathDisplay(currentPath, getSelectedProfileName());
 
             if (config.steamUser && config.steamUser.trim() !== '') {
                 steamUserInput.value = config.steamUser;
@@ -1317,6 +1327,25 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     const browseBackBtn = document.getElementById('browse-back');
+    const currentPathDisplay = document.getElementById('current-path');
+    
+    function updatePathDisplay(path, profileName) {
+        if (!currentPathDisplay) return;
+        
+        const baseDir = replayDirInput.value.trim() || '(not set)';
+        let fullPath = baseDir;
+        
+        if (profileName) {
+            fullPath += '/' + profileName;
+        }
+        
+        if (path) {
+            fullPath += '/' + path;
+        }
+        
+        currentPathDisplay.textContent = fullPath;
+        currentPathDisplay.title = fullPath;
+    }
     
     function browseDirectory(path = '', profileNameOverride, silent = false) {
         if (!replayList) {
@@ -1340,6 +1369,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const pathChanged = currentPath !== path;
                 currentPath = path;
                 browseBackBtn.style.display = path ? 'inline-block' : 'none';
+                updatePathDisplay(path, profileName);
                 renderBrowseList(items, silent && !pathChanged);
                 if (window.updateHistoryStatus && !silent) {
                     window.updateHistoryStatus();

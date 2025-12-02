@@ -37,6 +37,24 @@ I am very interested to see what other people learn! 🧐 This tool helps you ef
 
 > **Note**: Keep the launcher window open while using the tool. To stop it, press Ctrl+C in that window.
 
+### 📁 Understanding the Replay Directory Structure
+
+When you first open the tool, you'll need to configure the **Replay Directory**. Here's how it works:
+
+1. **Base Replay Directory**: Set this to your Dota 2 replays folder. The default location is usually:
+   - **Windows**: `C:\Program Files (x86)\Steam\steamapps\common\dota 2 beta\game\dota\replays\`
+   - **Linux**: `~/.steam/debian-installation/steamapps/common/dota 2 beta/game/dota/replays/`
+   - **Mac**: `~/Library/Application Support/Steam/steamapps/common/dota 2 beta/game/dota/replays/`
+
+2. **Profile-Based Organization**: 
+   - If you **don't select a profile**, replays are looked for directly in the base directory
+   - If you **select a profile** (e.g., "Main"), replays are looked for in: `{base directory}/{ProfileName}/`
+   - For example: `/path/to/replays/Main/` or `/path/to/replays/Main/fatal/` for fatal games
+
+3. **Current Path Display**: The file browser on the right shows the full path it's currently browsing, including the base directory and any selected profile subdirectory.
+
+**Tip**: You can organize replays by profile by creating subdirectories in your replays folder. The tool will automatically detect and browse them when you select the corresponding profile.
+
 ---
 
 ## 🔧 Building from Source (For Developers)
