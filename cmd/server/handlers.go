@@ -1126,8 +1126,21 @@ func handleHeroIcon(w http.ResponseWriter, r *http.Request) {
 	heroIdMapping := map[string]string{
 		"zeus": "zuus",
 	}
+	originalHeroId := heroId
 	if mappedId, ok := heroIdMapping[heroId]; ok {
 		heroId = mappedId
+	}
+
+	localPath := filepath.Join("assets", "portraits", fmt.Sprintf("%s.png", originalHeroId))
+	if _, err := os.Stat(localPath); err == nil {
+		file, err := os.Open(localPath)
+		if err == nil {
+			defer file.Close()
+			w.Header().Set("Content-Type", "image/png")
+			w.Header().Set("Cache-Control", "public, max-age=31536000")
+			io.Copy(w, file)
+			return
+		}
 	}
 
 	heroesWithoutIcon := map[string]bool{
@@ -1135,7 +1148,7 @@ func handleHeroIcon(w http.ResponseWriter, r *http.Request) {
 		"ringmaster":   true,
 		"marci":        true,
 		"muerta":       true,
-		"dawnbreaker": true,
+		"dawnbreaker":  true,
 	}
 
 	var iconUrl string

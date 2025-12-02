@@ -218,7 +218,27 @@
                                 </div>
                             </div>
                         </div>
+                        <div class="timeline-graph-header">
+                            <div class="graph-view-selector">
+                                <button class="graph-view-tab" data-view="reports" title="Report Timestamps">
+                                    <span class="tab-icon">📊</span>
+                                    <span class="tab-label">Report Timestamps</span>
+                                </button>
+                                <button class="graph-view-tab active" data-view="playerReports" title="Player Reports">
+                                    <span class="tab-icon">👤</span>
+                                    <span class="tab-label">Player Reports</span>
+                                </button>
+                                <button class="graph-view-tab" data-view="scoreboard" title="Scoreboard Activity">
+                                    <span class="tab-icon">📈</span>
+                                    <span class="tab-label">Scoreboard</span>
+                                </button>
+                            </div>
+                        </div>
                         <div id="timeline-graph-container" class="timeline-graph-container">
+                            <div id="graph-loading-overlay" class="graph-loading-overlay hidden">
+                                <div class="graph-loading-spinner"></div>
+                                <div class="graph-loading-text">Loading graph...</div>
+                            </div>
                             <canvas id="timeline-graph"></canvas>
                         </div>
                         <div id="graphs-section" class="graphs-section hidden">

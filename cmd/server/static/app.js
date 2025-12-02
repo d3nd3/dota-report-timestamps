@@ -255,6 +255,9 @@ async function fetchWithRetry(url, options = {}, maxRetries = 3, baseDelay = 100
 document.addEventListener('DOMContentLoaded', () => {
     let currentPath = '';
     let currentReplays = [];
+    const playerInfoCache = new Map();
+    const heroLookupCache = new Map();
+    const playerSelectorCache = new Map();
     
     const replayDirInput = document.getElementById('replay-dir');
     const saveConfigBtn = document.getElementById('save-config');
@@ -282,7 +285,79 @@ document.addEventListener('DOMContentLoaded', () => {
     const playerSelectorContainer = document.getElementById('player-selector-container');
     const playerSelectorDisplay = document.getElementById('player-selector-display');
     const playerSelectorDropdown = document.getElementById('player-selector-dropdown');
+    const playerSelectorLabel = playerSelectorContainer ? playerSelectorContainer.querySelector('label') : null;
     const timelineGraphContainer = document.getElementById('timeline-graph-container');
+    const graphLoadingOverlay = document.getElementById('graph-loading-overlay');
+    const graphViewTabs = document.querySelectorAll('.graph-view-tab');
+    
+    let currentGraphView = 'playerReports';
+    
+    function updateGraphViewTabs() {
+        graphViewTabs.forEach(tab => {
+            const view = tab.dataset.view;
+            if (view === currentGraphView) {
+                tab.classList.add('active');
+            } else {
+                tab.classList.remove('active');
+            }
+        });
+    }
+    
+    function showGraphLoading() {
+        console.log('[GRAPH DEBUG] showGraphLoading() called');
+        let overlay = document.getElementById('graph-loading-overlay');
+        if (!overlay) {
+            console.log('[GRAPH DEBUG] Creating new overlay element');
+            overlay = document.createElement('div');
+            overlay.id = 'graph-loading-overlay';
+            overlay.className = 'graph-loading-overlay';
+            const spinner = document.createElement('div');
+            spinner.className = 'graph-loading-spinner';
+            const text = document.createElement('div');
+            text.className = 'graph-loading-text';
+            text.textContent = 'Loading graph...';
+            overlay.appendChild(spinner);
+            overlay.appendChild(text);
+            timelineGraphContainer.appendChild(overlay);
+        }
+        overlay.classList.remove('hidden');
+        overlay.style.display = 'flex';
+        overlay.style.opacity = '1';
+        overlay.style.visibility = 'visible';
+        overlay.style.pointerEvents = 'auto';
+        console.log('[GRAPH DEBUG] Overlay shown, display:', overlay.style.display, 'opacity:', overlay.style.opacity);
+    }
+    
+    function hideGraphLoading() {
+        console.log('[GRAPH DEBUG] hideGraphLoading() called');
+        const overlay = document.getElementById('graph-loading-overlay');
+        if (overlay) {
+            overlay.classList.add('hidden');
+            overlay.style.display = 'none';
+            overlay.style.visibility = 'hidden';
+            overlay.style.pointerEvents = 'none';
+            console.log('[GRAPH DEBUG] Overlay hidden');
+        } else {
+            console.log('[GRAPH DEBUG] WARNING: Overlay not found when trying to hide');
+        }
+        if (graphLoadingOverlay) {
+            graphLoadingOverlay.classList.add('hidden');
+            graphLoadingOverlay.style.display = 'none';
+            graphLoadingOverlay.style.visibility = 'hidden';
+            graphLoadingOverlay.style.pointerEvents = 'none';
+        }
+    }
+    
+    function updatePlayerSelectorLabel() {
+        if (!playerSelectorLabel) return;
+        if (currentGraphView === 'reports') {
+            playerSelectorLabel.textContent = 'Select Player (who received reports):';
+        } else if (currentGraphView === 'playerReports') {
+            playerSelectorLabel.textContent = 'Select Player (who created reports):';
+        } else if (currentGraphView === 'scoreboard') {
+            playerSelectorLabel.textContent = 'Select Player (scoreboard activity):';
+        }
+    }
     const timelineGraphCanvas = document.getElementById('timeline-graph');
     let playerSelectorOptions = [];
     const historySteamIdInput = document.getElementById('history-steam-id');
@@ -1561,14 +1636,16 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 matchData.push({
                     matchID: result.MatchID,
-                    filePath: filePath, // Store filePath for later use (e.g., player-info)
+                    filePath: filePath,
                     teamReports: uniqueTeamReports,
                     enemyReports: uniqueEnemyReports,
                     confirmedTeamReports: confirmedTeamReports,
                     confirmedEnemyReports: confirmedEnemyReports,
                     unconfirmedTeamReports: unconfirmedTeamReports,
                     unconfirmedEnemyReports: unconfirmedEnemyReports,
-                    reports: result.Reports || []
+                    reports: result.Reports || [],
+                    scoreboardActivities: result.scoreboardActivities || [],
+                    players: result.Players || []
                 });
 
                 if (result.Reports) {
@@ -1689,7 +1766,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         selectPlayerOption(matchingPlayer.key);
                     } else {
                         console.log('No matching player found for Steam ID:', steamIDToMatch);
-                        renderTimelineGraph(matchData[0], null);
+                        renderCurrentGraph(matchData[0], null);
                     }
                 } else {
                     renderTimelineGraph(matchData[0], null);
@@ -1698,9 +1775,65 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    async function getPlayerInfo(matchData) {
+        const cacheKey = String(matchData.matchID);
+        if (playerInfoCache.has(cacheKey)) {
+            return playerInfoCache.get(cacheKey);
+        }
+        
+        try {
+            const res = await fetch('/api/player-info', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    matchId: String(matchData.matchID),
+                    filePath: matchData.filePath || '',
+                    profileName: getSelectedProfileName()
+                })
+            });
+            
+            if (res.ok) {
+                const playersText = await res.text();
+                const playersTextFixed = playersText.replace(/"SteamID":\s*(\d+)/g, '"SteamID":"$1"');
+                const players = JSON.parse(playersTextFixed);
+                const playerInfoMap = new Map();
+                const heroLookupBySlot = new Map();
+                const heroLookupBySteamID = new Map();
+                
+                players.forEach(p => {
+                    const steamIDStr = p.SteamID ? String(p.SteamID) : null;
+                    playerInfoMap.set(p.Slot, { name: p.Name, hero: p.Hero, team: p.Team, steamID: steamIDStr });
+                    if (p.Slot >= 0 && p.Slot < 10 && p.Hero) {
+                        heroLookupBySlot.set(p.Slot, p.Hero);
+                    }
+                    if (steamIDStr && steamIDStr !== '0') {
+                        heroLookupBySteamID.set(steamIDStr, p.Hero);
+                    }
+                });
+                
+                const result = { playerInfoMap, heroLookupBySlot, heroLookupBySteamID, players };
+                playerInfoCache.set(cacheKey, result);
+                heroLookupCache.set(cacheKey, { heroLookupBySlot, heroLookupBySteamID });
+                return result;
+            }
+        } catch (err) {
+            console.error('Error loading player info:', err);
+        }
+        
+        return { playerInfoMap: new Map(), heroLookupBySlot: new Map(), heroLookupBySteamID: new Map(), players: [] };
+    }
+
     async function populatePlayerSelector(matchData) {
         if (!matchData || !matchData.reports || matchData.reports.length === 0) {
             playerSelectorContainer.classList.add('hidden');
+            return;
+        }
+
+        const cacheKey = `${matchData.matchID}_${currentGraphView}`;
+        if (playerSelectorCache.has(cacheKey)) {
+            playerSelectorOptions = playerSelectorCache.get(cacheKey);
+            renderPlayerSelector();
+            playerSelectorContainer.classList.remove('hidden');
             return;
         }
 
@@ -1747,30 +1880,56 @@ document.addEventListener('DOMContentLoaded', () => {
         const buildPlayersMap = (steamIDToSlotMap) => {
             const map = new Map();
             const skipped = [];
+            const isPlayerReportsMode = currentGraphView === 'playerReports';
             
             matchData.reports.forEach((report, idx) => {
                 let key;
-                const targetSlot = report.TargetSlot;
-                const targetSteamID = report.TargetSteamID ? String(report.TargetSteamID) : null;
+                let finalSlot;
+                let finalSteamID;
                 
-                let finalSlot = targetSlot;
-                let finalSteamID = targetSteamID;
-                
-                if (targetSlot != null && targetSlot !== undefined && Number.isInteger(targetSlot) && targetSlot >= 0 && targetSlot < 10) {
-                    key = `slot_${targetSlot}`;
-                    if (!finalSteamID && slotToSteamID.has(targetSlot)) {
-                        finalSteamID = slotToSteamID.get(targetSlot);
-                    }
-                } else if (targetSteamID && targetSteamID !== '0') {
-                    if (steamIDToSlotMap && steamIDToSlotMap.has(targetSteamID)) {
-                        finalSlot = steamIDToSlotMap.get(targetSteamID);
+                if (isPlayerReportsMode) {
+                    finalSlot = report.Slot;
+                    finalSteamID = report.SteamID ? String(report.SteamID) : null;
+                    
+                    if (finalSlot != null && finalSlot !== undefined && Number.isInteger(finalSlot) && finalSlot >= 0 && finalSlot < 10) {
                         key = `slot_${finalSlot}`;
+                        if (!finalSteamID && slotToSteamID.has(finalSlot)) {
+                            finalSteamID = slotToSteamID.get(finalSlot);
+                        }
+                    } else if (finalSteamID && finalSteamID !== '0') {
+                        if (steamIDToSlotMap && steamIDToSlotMap.has(finalSteamID)) {
+                            finalSlot = steamIDToSlotMap.get(finalSteamID);
+                            key = `slot_${finalSlot}`;
+                        } else {
+                            key = `steamid_${finalSteamID}`;
+                        }
                     } else {
-                        key = `steamid_${targetSteamID}`;
+                        skipped.push({ idx, slot: finalSlot, steamID: finalSteamID, time: report.Time });
+                        return;
                     }
                 } else {
-                    skipped.push({ idx, targetSlot, targetSteamID, time: report.Time });
-                    return;
+                    const targetSlot = report.TargetSlot;
+                    const targetSteamID = report.TargetSteamID ? String(report.TargetSteamID) : null;
+                    
+                    finalSlot = targetSlot;
+                    finalSteamID = targetSteamID;
+                    
+                    if (targetSlot != null && targetSlot !== undefined && Number.isInteger(targetSlot) && targetSlot >= 0 && targetSlot < 10) {
+                        key = `slot_${targetSlot}`;
+                        if (!finalSteamID && slotToSteamID.has(targetSlot)) {
+                            finalSteamID = slotToSteamID.get(targetSlot);
+                        }
+                    } else if (targetSteamID && targetSteamID !== '0') {
+                        if (steamIDToSlotMap && steamIDToSlotMap.has(targetSteamID)) {
+                            finalSlot = steamIDToSlotMap.get(targetSteamID);
+                            key = `slot_${finalSlot}`;
+                        } else {
+                            key = `steamid_${targetSteamID}`;
+                        }
+                    } else {
+                        skipped.push({ idx, targetSlot, targetSteamID, time: report.Time });
+                        return;
+                    }
                 }
                 
                 if (!map.has(key)) {
@@ -1789,15 +1948,23 @@ document.addEventListener('DOMContentLoaded', () => {
         const slotToSteamID = new Map();
         let steamIDToSlot = new Map();
         const skippedReports = [];
+        const isPlayerReportsMode = currentGraphView === 'playerReports';
         
         matchData.reports.forEach((report, idx) => {
-            const targetSlot = report.TargetSlot;
-            const targetSteamID = report.TargetSteamID ? String(report.TargetSteamID) : null;
+            let slot, steamID;
             
-            if (targetSlot != null && targetSlot !== undefined && Number.isInteger(targetSlot) && targetSlot >= 0 && targetSlot < 10) {
-                if (targetSteamID && targetSteamID !== '0') {
-                    slotToSteamID.set(targetSlot, targetSteamID);
-                    steamIDToSlot.set(targetSteamID, targetSlot);
+            if (isPlayerReportsMode) {
+                slot = report.Slot;
+                steamID = report.SteamID ? String(report.SteamID) : null;
+            } else {
+                slot = report.TargetSlot;
+                steamID = report.TargetSteamID ? String(report.TargetSteamID) : null;
+            }
+            
+            if (slot != null && slot !== undefined && Number.isInteger(slot) && slot >= 0 && slot < 10) {
+                if (steamID && steamID !== '0') {
+                    slotToSteamID.set(slot, steamID);
+                    steamIDToSlot.set(steamID, slot);
                 }
             }
         });
@@ -1813,36 +1980,76 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         console.log('Initial playersMap created with', playersMap.size, 'players:', Array.from(playersMap.entries()).map(([k, v]) => `${k}: slot=${v.slot}, steamID=${v.steamID}, reports=${v.reportCount}`));
 
-        try {
-            const res = await fetch('/api/player-info', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    matchId: String(matchData.matchID),
-                    filePath: matchData.filePath || '', // Include filePath if available
-                    profileName: getSelectedProfileName()
-                })
-            });
-            
-            if (!res.ok) {
-                throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-            }
-            
-            const playersText = await res.text();
-            const playersTextFixed = playersText.replace(/"SteamID":\s*(\d+)/g, '"SteamID":"$1"');
-            const players = JSON.parse(playersTextFixed);
-            const playerInfoMap = new Map();
-            players.forEach(p => {
-                const steamIDStr = p.SteamID ? String(p.SteamID) : null;
-                playerInfoMap.set(p.Slot, { name: p.Name, hero: p.Hero, team: p.Team, steamID: steamIDStr });
-                if (steamIDStr && steamIDStr !== '0') {
-                    steamIDToSlot.set(steamIDStr, p.Slot);
-                    slotToSteamID.set(p.Slot, steamIDStr);
+        let players = [];
+        const selectorCacheKey = `${matchData.matchID}_${currentGraphView}`;
+        const playerInfoCacheKey = String(matchData.matchID);
+        
+        if (matchData.players && Array.isArray(matchData.players) && matchData.players.length > 0) {
+            players = matchData.players;
+            console.log('Using cached players from matchData, count:', players.length);
+        } else if (playerInfoCache.has(playerInfoCacheKey)) {
+            const cached = playerInfoCache.get(playerInfoCacheKey);
+            players = cached.players || [];
+            console.log('Using cached players from playerInfoCache, count:', players.length);
+        } else {
+            try {
+                const res = await fetch('/api/player-info', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        matchId: String(matchData.matchID),
+                        filePath: matchData.filePath || '',
+                        profileName: getSelectedProfileName()
+                    })
+                });
+                
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}: ${await res.text()}`);
                 }
-            });
-            
-            console.log('Player info loaded:', Array.from(playerInfoMap.entries()).map(([slot, info]) => `slot_${slot}: ${info.name} (steamID: ${info.steamID})`));
+                
+                const playersText = await res.text();
+                const playersTextFixed = playersText.replace(/"SteamID":\s*(\d+)/g, '"SteamID":"$1"');
+                players = JSON.parse(playersTextFixed);
+                console.log('Loaded players from API, count:', players.length);
+            } catch (err) {
+                console.error('Error loading player info:', err);
+                players = [];
+            }
+        }
+        
+        console.log('Total players loaded:', players.length, 'slots:', players.map(p => p.Slot));
+        
+        const playerInfoMap = new Map();
+        players.forEach(p => {
+            const steamIDStr = p.SteamID ? String(p.SteamID) : null;
+            playerInfoMap.set(p.Slot, { name: p.Name, hero: p.Hero, team: p.Team, steamID: steamIDStr });
+            if (steamIDStr && steamIDStr !== '0') {
+                steamIDToSlot.set(steamIDStr, p.Slot);
+                slotToSteamID.set(p.Slot, steamIDStr);
+            }
+        });
+        
+        const heroLookupBySlot = new Map();
+        const heroLookupBySteamID = new Map();
+        players.forEach(p => {
+            if (p.Slot >= 0 && p.Slot < 10 && p.Hero) {
+                heroLookupBySlot.set(p.Slot, p.Hero);
+            }
+            const steamIDStr = p.SteamID ? String(p.SteamID) : null;
+            if (steamIDStr && steamIDStr !== '0' && p.Hero) {
+                heroLookupBySteamID.set(steamIDStr, p.Hero);
+            }
+        });
+        
+        if (players.length > 0 && !playerInfoCache.has(playerInfoCacheKey)) {
+            playerInfoCache.set(playerInfoCacheKey, { playerInfoMap, heroLookupBySlot, heroLookupBySteamID, players });
+            heroLookupCache.set(playerInfoCacheKey, { heroLookupBySlot, heroLookupBySteamID });
+        }
+        
+        try {
+            console.log('Player info loaded:', Array.from(playerInfoMap.entries()).map(([slot, info]) => `slot_${slot}: ${info.name} (steamID: ${info.steamID}, hero: ${info.hero})`));
             console.log('Updated steamIDToSlot mapping:', Array.from(steamIDToSlot.entries()).map(([id, slot]) => `${id}: slot_${slot}`));
+            console.log('playerInfoMap size:', playerInfoMap.size, 'entries:', Array.from(playerInfoMap.keys()));
             
             const { map: updatedPlayersMap, skipped: remainingSkipped } = buildPlayersMap(steamIDToSlot);
             playersMap = updatedPlayersMap;
@@ -1873,29 +2080,58 @@ document.addEventListener('DOMContentLoaded', () => {
             const targetPlayerMap = new Map();
             matchData.reports.forEach(report => {
                 let key;
-                const targetSlot = report.TargetSlot;
-                const targetSteamID = report.TargetSteamID;
+                let finalSlot;
+                let name;
+                let hero;
                 
-                let finalSlot = targetSlot;
-                
-                if (targetSlot != null && targetSlot !== undefined && Number.isInteger(targetSlot) && targetSlot >= 0 && targetSlot < 10) {
-                    key = `slot_${targetSlot}`;
-                } else if (targetSteamID && targetSteamID > 0) {
-                    if (steamIDToSlot.has(targetSteamID)) {
-                        finalSlot = steamIDToSlot.get(targetSteamID);
+                if (isPlayerReportsMode) {
+                    finalSlot = report.Slot;
+                    const reporterSteamID = report.SteamID;
+                    
+                    if (finalSlot != null && finalSlot !== undefined && Number.isInteger(finalSlot) && finalSlot >= 0 && finalSlot < 10) {
                         key = `slot_${finalSlot}`;
+                    } else if (reporterSteamID && reporterSteamID > 0) {
+                        const reporterSteamIDStr = String(reporterSteamID);
+                        if (steamIDToSlot.has(reporterSteamIDStr)) {
+                            finalSlot = steamIDToSlot.get(reporterSteamIDStr);
+                            key = `slot_${finalSlot}`;
+                        } else {
+                            key = `steamid_${reporterSteamIDStr}`;
+                        }
                     } else {
-                        key = `steamid_${targetSteamID}`;
+                        return;
                     }
+                    
+                    name = report.Name || '';
+                    hero = report.Hero || '';
                 } else {
-                    return;
+                    const targetSlot = report.TargetSlot;
+                    const targetSteamID = report.TargetSteamID;
+                    
+                    finalSlot = targetSlot;
+                    
+                    if (targetSlot != null && targetSlot !== undefined && Number.isInteger(targetSlot) && targetSlot >= 0 && targetSlot < 10) {
+                        key = `slot_${targetSlot}`;
+                    } else if (targetSteamID && targetSteamID > 0) {
+                        if (steamIDToSlot.has(String(targetSteamID))) {
+                            finalSlot = steamIDToSlot.get(String(targetSteamID));
+                            key = `slot_${finalSlot}`;
+                        } else {
+                            key = `steamid_${targetSteamID}`;
+                        }
+                    } else {
+                        return;
+                    }
+                    
+                    name = report.TargetName || '';
+                    hero = report.TargetHero || '';
                 }
                 
                 if (!targetPlayerMap.has(key)) {
                     targetPlayerMap.set(key, {
                         slot: finalSlot,
-                        name: report.TargetName || '',
-                        hero: report.TargetHero || ''
+                        name: name,
+                        hero: hero
                     });
                 }
             });
@@ -1903,94 +2139,131 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log('targetPlayerMap keys after update:', Array.from(targetPlayerMap.keys()));
 
             playerSelectorOptions = [];
-            const playerList = Array.from(playersMap.entries()).sort((a, b) => {
-                const slotA = a[1].slot !== undefined && a[1].slot >= 0 ? a[1].slot : 999;
-                const slotB = b[1].slot !== undefined && b[1].slot >= 0 ? b[1].slot : 999;
-                return slotA - slotB;
-            });
-            
             playerSelectorOptions.push({ key: '', name: 'All Players', hero: '', team: null, reportCount: 0, slot: null });
             
-            console.log('targetPlayerMap keys:', Array.from(targetPlayerMap.keys()));
-            console.log('playerList keys:', playerList.map(([k]) => k));
-            
-            playerList.forEach(([key, player]) => {
+            for (let slot = 0; slot < 10; slot++) {
+                const key = `slot_${slot}`;
+                const apiInfo = playerInfoMap.get(slot);
+                const playerData = playersMap.get(key);
                 const targetInfo = targetPlayerMap.get(key);
-                let apiInfo = null;
-                if (player.slot !== undefined && player.slot >= 0 && player.slot < 10) {
-                    apiInfo = playerInfoMap.get(player.slot);
-                }
-                const playerName = (targetInfo && targetInfo.name) || (apiInfo && apiInfo.name) || (player.slot !== undefined && player.slot >= 0 ? `Slot ${player.slot}` : 'Unknown Player');
-                const heroName = (targetInfo && targetInfo.hero) || (apiInfo && apiInfo.hero) || '';
-                const team = apiInfo && apiInfo.team ? (apiInfo.team === 2 ? 'radiant' : apiInfo.team === 3 ? 'dire' : null) : null;
                 
-                console.log(`Adding player option: key=${key}, slot=${player.slot}, steamID=${player.steamID}, name=${playerName}, hero=${heroName}, reports=${player.reportCount}`);
+                let playerName = (apiInfo && apiInfo.name) || (targetInfo && targetInfo.name) || `Slot ${slot}`;
+                let heroName = (apiInfo && apiInfo.hero) || (targetInfo && targetInfo.hero) || '';
+                
+                if (!heroName) {
+                    heroName = heroLookupBySlot.get(slot) || '';
+                    if (!heroName && playerData && playerData.steamID) {
+                        heroName = heroLookupBySteamID.get(String(playerData.steamID)) || '';
+                    }
+                    if (!heroName && apiInfo && apiInfo.steamID) {
+                        heroName = heroLookupBySteamID.get(String(apiInfo.steamID)) || '';
+                    }
+                }
+                
+                const team = apiInfo && apiInfo.team ? (apiInfo.team === 2 ? 'radiant' : apiInfo.team === 3 ? 'dire' : null) : null;
+                const reportCount = playerData ? (playerData.reportCount || 0) : 0;
+                const steamID = playerData ? (playerData.steamID ? String(playerData.steamID) : null) : (apiInfo ? (apiInfo.steamID ? String(apiInfo.steamID) : null) : null);
+                
+                console.log(`[PLAYER SELECTOR] Slot ${slot}: name="${playerName}", hero="${heroName}", apiInfo=${!!apiInfo}, playerData=${!!playerData}, targetInfo=${!!targetInfo}`);
                 
                 playerSelectorOptions.push({
                     key: key,
                     name: playerName,
                     hero: heroName,
                     team: team,
-                    reportCount: player.reportCount,
-                    slot: player.slot,
-                    steamID: player.steamID ? String(player.steamID) : null
+                    reportCount: reportCount,
+                    slot: slot,
+                    steamID: steamID
                 });
-            });
+            }
             
             console.log('Final playerSelectorOptions count:', playerSelectorOptions.length);
+            console.log('Player selector options:', playerSelectorOptions.map(opt => ({ key: opt.key, slot: opt.slot, name: opt.name, hero: opt.hero, reportCount: opt.reportCount })));
+            const slot4Option = playerSelectorOptions.find(opt => opt.key === 'slot_4' || opt.slot === 4);
+            if (slot4Option) {
+                console.log('Slot 4 option found:', slot4Option);
+            } else {
+                console.warn('Slot 4 option NOT found in playerSelectorOptions!');
+            }
             console.log('=== END populatePlayerSelector DEBUG ===');
 
+            playerSelectorCache.set(selectorCacheKey, playerSelectorOptions);
             renderPlayerSelector();
             playerSelectorContainer.classList.remove('hidden');
         } catch (err) {
             console.error('Error loading player info:', err);
             const targetPlayerMap = new Map();
+            const isPlayerReportsMode = currentGraphView === 'playerReports';
             matchData.reports.forEach(report => {
                 let key;
-                const targetSlot = report.TargetSlot;
-                const targetSteamID = report.TargetSteamID;
+                let finalSlot;
+                let name;
+                let hero;
                 
-                if (targetSlot != null && targetSlot !== undefined && Number.isInteger(targetSlot) && targetSlot >= 0 && targetSlot < 10) {
-                    key = `slot_${targetSlot}`;
-                } else if (targetSteamID && targetSteamID > 0) {
-                    key = `steamid_${targetSteamID}`;
+                if (isPlayerReportsMode) {
+                    finalSlot = report.Slot;
+                    const reporterSteamID = report.SteamID;
+                    
+                    if (finalSlot != null && finalSlot !== undefined && Number.isInteger(finalSlot) && finalSlot >= 0 && finalSlot < 10) {
+                        key = `slot_${finalSlot}`;
+                    } else if (reporterSteamID && reporterSteamID > 0) {
+                        key = `steamid_${reporterSteamID}`;
+                    } else {
+                        return;
+                    }
+                    
+                    name = report.Name || '';
+                    hero = report.Hero || '';
                 } else {
-                    return;
+                    const targetSlot = report.TargetSlot;
+                    const targetSteamID = report.TargetSteamID;
+                    
+                    finalSlot = targetSlot;
+                    
+                    if (targetSlot != null && targetSlot !== undefined && Number.isInteger(targetSlot) && targetSlot >= 0 && targetSlot < 10) {
+                        key = `slot_${targetSlot}`;
+                    } else if (targetSteamID && targetSteamID > 0) {
+                        key = `steamid_${targetSteamID}`;
+                    } else {
+                        return;
+                    }
+                    
+                    name = report.TargetName || '';
+                    hero = report.TargetHero || '';
                 }
                 
                 if (!targetPlayerMap.has(key)) {
                     targetPlayerMap.set(key, {
-                        slot: targetSlot,
-                        name: report.TargetName || '',
-                        hero: report.TargetHero || ''
+                        slot: finalSlot,
+                        name: name,
+                        hero: hero
                     });
                 }
             });
 
             playerSelectorOptions = [];
-            const playerList = Array.from(playersMap.entries()).sort((a, b) => {
-                const slotA = a[1].slot !== undefined && a[1].slot >= 0 && a[1].slot < 10 ? a[1].slot : 999;
-                const slotB = b[1].slot !== undefined && b[1].slot >= 0 && b[1].slot < 10 ? b[1].slot : 999;
-                return slotA - slotB;
-            });
-            
             playerSelectorOptions.push({ key: '', name: 'All Players', hero: '', team: null, reportCount: 0, slot: null });
             
-            playerList.forEach(([key, player]) => {
+            for (let slot = 0; slot < 10; slot++) {
+                const key = `slot_${slot}`;
+                const playerData = playersMap.get(key);
                 const targetInfo = targetPlayerMap.get(key);
-                const playerName = (targetInfo && targetInfo.name) || (player.slot !== undefined && player.slot >= 0 ? `Slot ${player.slot}` : 'Unknown Player');
+                
+                const playerName = (targetInfo && targetInfo.name) || `Slot ${slot}`;
                 const heroName = (targetInfo && targetInfo.hero) || '';
+                const reportCount = playerData ? (playerData.reportCount || 0) : 0;
+                const steamID = playerData ? (playerData.steamID ? String(playerData.steamID) : null) : null;
                 
                 playerSelectorOptions.push({
                     key: key,
                     name: playerName,
                     hero: heroName,
                     team: null,
-                    reportCount: player.reportCount,
-                    slot: player.slot,
-                    steamID: player.steamID ? String(player.steamID) : null
+                    reportCount: reportCount,
+                    slot: slot,
+                    steamID: steamID
                 });
-            });
+            }
 
             renderPlayerSelector();
             playerSelectorContainer.classList.remove('hidden');
@@ -2005,17 +2278,97 @@ document.addEventListener('DOMContentLoaded', () => {
         return minutes + seconds / 60;
     }
 
+    async function renderCurrentGraph(matchData, playerFilter = null) {
+        const canvas = timelineGraphContainer.querySelector('canvas');
+        const title = timelineGraphContainer.querySelector('.graph-title');
+        if (canvas) canvas.style.opacity = '0';
+        if (title) title.style.opacity = '0';
+        showGraphLoading();
+        try {
+            updatePlayerSelectorLabel();
+            if (currentGraphView === 'scoreboard') {
+                renderScoreboardActivityGraph(matchData, playerFilter);
+            } else if (currentGraphView === 'playerReports') {
+                await renderPlayerReportsGraph(matchData, playerFilter);
+            } else {
+                renderTimelineGraph(matchData, playerFilter);
+            }
+            if (currentSelectedPlayer && playerSelectorOptions.length > 0) {
+                const option = playerSelectorOptions.find(o => o.key === currentSelectedPlayer);
+                if (option) {
+                    const iconUrl = option.hero ? getHeroIconUrl(option.hero) : null;
+                    const playerColor = getSlotColor(option.slot);
+                    let html = '';
+                    if (iconUrl) {
+                        html += `<img src="${iconUrl}" alt="${option.hero}" class="player-selector-icon" onerror="this.style.display='none'">`;
+                    }
+                    html += `<span class="player-selector-name" style="color: ${playerColor}">${option.name}</span>`;
+                    if (option.reportCount > 0) {
+                        html += `<span class="player-selector-count">${option.reportCount} report${option.reportCount !== 1 ? 's' : ''}</span>`;
+                    }
+                    html += '<span class="select-chevron">▼</span>';
+                    if (playerSelectorDisplay) {
+                        playerSelectorDisplay.innerHTML = html;
+                    }
+                }
+            }
+        } finally {
+            hideGraphLoading();
+        }
+    }
+
     function renderTimelineGraph(matchData, playerFilter = null) {
         if (!matchData || !matchData.reports || matchData.reports.length === 0) {
+            const timelineOverlay = timelineGraphContainer.querySelector('#graph-loading-overlay');
+            if (timelineOverlay) {
+                timelineOverlay.remove();
+            }
             timelineGraphContainer.innerHTML = '<p style="text-align: center; color: var(--text-secondary); padding: 2rem;">No reports found for this match.</p>';
+            hideGraphLoading();
             return;
         }
 
         let reports = matchData.reports;
+        
+        const slot4Reports = reports.filter(r => r.TargetSlot === 4);
+        if (slot4Reports.length > 0) {
+            console.log(`[FRONTEND] DEBUG: Found ${slot4Reports.length} reports targeting slot 4:`, slot4Reports.map(r => ({
+                Time: r.Time,
+                Reporter: `${r.Name} (Slot ${r.Slot})`,
+                Target: `${r.TargetName} (Slot ${r.TargetSlot})`
+            })));
+        } else {
+            console.log(`[FRONTEND] DEBUG: No reports found targeting slot 4. All TargetSlots:`, [...new Set(reports.map(r => r.TargetSlot))].sort());
+        }
+        
         if (playerFilter) {
             if (playerFilter.startsWith('slot_')) {
                 const targetSlot = parseInt(playerFilter.replace('slot_', ''));
-                reports = reports.filter(r => r.TargetSlot === targetSlot);
+                console.log(`[FRONTEND] Filtering reports for TargetSlot: ${targetSlot} (type: ${typeof targetSlot})`);
+                console.log(`[FRONTEND] Total reports before filter: ${reports.length}`);
+                
+                const reportsForTargetSlot = reports.filter(r => r.TargetSlot === targetSlot);
+                console.log(`[FRONTEND] Reports with TargetSlot === ${targetSlot}:`, reportsForTargetSlot.length, 'reports found');
+                reportsForTargetSlot.forEach((r, idx) => {
+                    console.log(`[FRONTEND]   Report ${idx + 1}: Time="${r.Time}", Reporter="${r.Name}" (Slot ${r.Slot}), Target="${r.TargetName}" (Slot ${r.TargetSlot}), Team="${r.Team}"`);
+                });
+                
+                console.log(`[FRONTEND] Sample reports:`, reports.slice(0, 3).map(r => ({
+                    Time: r.Time,
+                    Reporter: r.Name,
+                    ReporterSlot: r.Slot,
+                    TargetSlot: r.TargetSlot,
+                    TargetSlotType: typeof r.TargetSlot,
+                    TargetName: r.TargetName
+                })));
+                reports = reports.filter(r => {
+                    const matches = r.TargetSlot === targetSlot;
+                    if (!matches && r.TargetSlot != null) {
+                        console.log(`[FRONTEND] Report filtered out - TargetSlot: ${r.TargetSlot} (${typeof r.TargetSlot}) !== ${targetSlot} (${typeof targetSlot})`);
+                    }
+                    return matches;
+                });
+                console.log(`[FRONTEND] Reports after filter: ${reports.length}`);
             } else if (playerFilter.startsWith('steamid_')) {
                 const targetSteamID = playerFilter.replace('steamid_', '');
                 reports = reports.filter(r => String(r.TargetSteamID) === targetSteamID);
@@ -2024,17 +2377,31 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (reports.length === 0) {
             timelineGraphContainer.innerHTML = '<p style="text-align: center; color: var(--text-secondary); padding: 2rem;">No reports found for the selected player.</p>';
+            hideGraphLoading();
             return;
         }
 
+        const title = document.createElement('h3');
+        title.className = 'graph-title';
+        title.textContent = 'Player Reported - Report Timestamps';
+        title.style.cssText = 'margin: 0 0 1rem 0; color: var(--text-primary); font-size: 1.25rem; font-weight: 600;';
+        
         const canvas = document.createElement('canvas');
         canvas.id = 'timeline-graph';
         const tooltip = document.createElement('div');
         tooltip.id = 'timeline-tooltip';
         tooltip.className = 'timeline-tooltip hidden';
+        
         timelineGraphContainer.innerHTML = '';
+        showGraphLoading();
+        timelineGraphContainer.appendChild(title);
         timelineGraphContainer.appendChild(canvas);
         timelineGraphContainer.appendChild(tooltip);
+        
+        canvas.style.opacity = '0';
+        canvas.style.visibility = 'hidden';
+        title.style.opacity = '0';
+        title.style.visibility = 'hidden';
 
         const ctx = canvas.getContext('2d');
         const padding = { top: 60, right: 40, bottom: 60, left: 80 };
@@ -2123,7 +2490,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 let currentY = minY + 10;
                 indices.forEach(idx => {
                     sorted[idx].y = currentY;
-                    currentY += iconSize + iconSpacing;
+                    const candidateCount = (sorted[idx].report.Candidates && sorted[idx].report.Candidates.length > 0) ? sorted[idx].report.Candidates.length : 1;
+                    currentY += (iconSize + iconSpacing) * candidateCount;
                 });
             });
 
@@ -2334,6 +2702,32 @@ document.addEventListener('DOMContentLoaded', () => {
 
         drawIcons();
 
+        function showTimelineGraphWhenReady() {
+            console.log('[GRAPH DEBUG] showTimelineGraphWhenReady() called');
+            hideGraphLoading();
+            requestAnimationFrame(() => {
+                const canvas = timelineGraphContainer.querySelector('canvas');
+                const title = timelineGraphContainer.querySelector('.graph-title');
+                console.log('[GRAPH DEBUG] Canvas found:', !!canvas, 'Title found:', !!title);
+                if (canvas) {
+                    canvas.style.opacity = '1';
+                    canvas.style.visibility = 'visible';
+                    canvas.style.display = 'block';
+                    console.log('[GRAPH DEBUG] Canvas shown, opacity:', canvas.style.opacity, 'visibility:', canvas.style.visibility);
+                } else {
+                    console.error('[GRAPH DEBUG] ERROR: Canvas not found!');
+                }
+                if (title) {
+                    title.style.opacity = '1';
+                    title.style.visibility = 'visible';
+                    title.style.display = 'block';
+                    console.log('[GRAPH DEBUG] Title shown');
+                } else {
+                    console.error('[GRAPH DEBUG] ERROR: Title not found!');
+                }
+            });
+        }
+
         if (totalImages > 0) {
             imagesToLoad.forEach(iconUrl => {
                 const img = new Image();
@@ -2342,6 +2736,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     imagesLoaded++;
                     if (imagesLoaded === totalImages) {
                         drawIcons();
+                        showTimelineGraphWhenReady();
                     } else if (imagesLoaded % 3 === 0) {
                         drawIcons();
                     }
@@ -2351,10 +2746,13 @@ document.addEventListener('DOMContentLoaded', () => {
                     imagesLoaded++;
                     if (imagesLoaded === totalImages) {
                         drawIcons();
+                        showTimelineGraphWhenReady();
                     }
                 };
                 img.src = iconUrl;
             });
+        } else {
+            showTimelineGraphWhenReady();
         }
 
         canvas.addEventListener('mousemove', (e) => {
@@ -2411,6 +2809,1095 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    async function renderPlayerReportsGraph(matchData, playerFilter = null) {
+        console.log('[GRAPH DEBUG] renderPlayerReportsGraph() called');
+        showGraphLoading();
+        
+        try {
+            if (!matchData || !matchData.reports || matchData.reports.length === 0) {
+                timelineGraphContainer.innerHTML = '<p style="text-align: center; color: var(--text-secondary); padding: 2rem;">No reports found for this match.</p>';
+                hideGraphLoading();
+                return;
+            }
+
+            let reports = matchData.reports;
+        
+        if (playerFilter) {
+            if (playerFilter.startsWith('slot_')) {
+                const reporterSlot = parseInt(playerFilter.replace('slot_', ''));
+                reports = reports.filter(r => r.Slot === reporterSlot);
+            } else if (playerFilter.startsWith('steamid_')) {
+                const reporterSteamID = playerFilter.replace('steamid_', '');
+                reports = reports.filter(r => String(r.SteamID) === reporterSteamID);
+            }
+        }
+
+            if (reports.length === 0) {
+                timelineGraphContainer.innerHTML = '<p style="text-align: center; color: var(--text-secondary); padding: 2rem;">No reports found for the selected player.</p>';
+                hideGraphLoading();
+                return;
+            }
+
+        const cacheKey = String(matchData.matchID);
+        let heroLookupBySlot = new Map();
+        let heroLookupBySteamID = new Map();
+        
+        if (heroLookupCache.has(cacheKey)) {
+            const cached = heroLookupCache.get(cacheKey);
+            heroLookupBySlot = cached.heroLookupBySlot;
+            heroLookupBySteamID = cached.heroLookupBySteamID;
+        } else if (matchData.players && Array.isArray(matchData.players) && matchData.players.length > 0) {
+            matchData.players.forEach(p => {
+                if (p.Slot >= 0 && p.Slot < 10 && p.Hero) {
+                    heroLookupBySlot.set(p.Slot, p.Hero);
+                }
+                const steamIDStr = p.SteamID ? String(p.SteamID) : null;
+                if (steamIDStr && steamIDStr !== '0') {
+                    heroLookupBySteamID.set(steamIDStr, p.Hero);
+                }
+            });
+            heroLookupCache.set(cacheKey, { heroLookupBySlot, heroLookupBySteamID });
+        } else {
+            const { heroLookupBySlot: slotLookup, heroLookupBySteamID: steamLookup } = await getPlayerInfo(matchData);
+            heroLookupBySlot = slotLookup;
+            heroLookupBySteamID = steamLookup;
+        }
+
+        reports = reports.map(report => {
+            const updatedReport = { ...report };
+            
+            if (!report.TargetHero || !report.TargetHero.trim()) {
+                let hero = null;
+                if (report.TargetSlot != null && report.TargetSlot >= 0 && report.TargetSlot < 10) {
+                    hero = heroLookupBySlot.get(report.TargetSlot);
+                }
+                if (!hero && report.TargetSteamID) {
+                    hero = heroLookupBySteamID.get(String(report.TargetSteamID));
+                }
+                if (hero) {
+                    updatedReport.TargetHero = hero;
+                }
+            }
+            
+            if (report.Candidates && report.Candidates.length > 0) {
+                updatedReport.Candidates = report.Candidates.map(candidate => {
+                    const heroName = candidate.Hero ? candidate.Hero.trim() : '';
+                    const isUnknown = !heroName || heroName.toLowerCase() === 'unknown';
+                    
+                    if (isUnknown) {
+                        let hero = null;
+                        if (candidate.Slot != null && candidate.Slot >= 0 && candidate.Slot < 10) {
+                            hero = heroLookupBySlot.get(candidate.Slot);
+                        }
+                        if (!hero && candidate.SteamID) {
+                            hero = heroLookupBySteamID.get(String(candidate.SteamID));
+                        }
+                        if (hero) {
+                            return { ...candidate, Hero: hero };
+                        }
+                    }
+                    return candidate;
+                });
+            }
+            
+            return updatedReport;
+        });
+
+        const title = document.createElement('h3');
+        title.className = 'graph-title';
+        title.textContent = 'Player Reports - Reports Created';
+        title.style.cssText = 'margin: 0 0 1rem 0; color: var(--text-primary); font-size: 1.25rem; font-weight: 600;';
+        
+        const canvas = document.createElement('canvas');
+        canvas.id = 'timeline-graph';
+        const tooltip = document.createElement('div');
+        tooltip.id = 'timeline-tooltip';
+        tooltip.className = 'timeline-tooltip hidden';
+        
+        timelineGraphContainer.innerHTML = '';
+        showGraphLoading();
+        timelineGraphContainer.appendChild(title);
+        timelineGraphContainer.appendChild(canvas);
+        timelineGraphContainer.appendChild(tooltip);
+        
+        canvas.style.opacity = '0';
+        canvas.style.visibility = 'hidden';
+        title.style.opacity = '0';
+        title.style.visibility = 'hidden';
+
+        const ctx = canvas.getContext('2d');
+        const padding = { top: 60, right: 40, bottom: 60, left: 80 };
+        const iconSize = 40;
+        const iconSpacing = 5;
+        
+        const maxTime = Math.max(...reports.map(r => parseTimeToMinutes(r.Time)), 60);
+        const timeRange = Math.max(maxTime, 60);
+
+        const friendlyReports = reports.filter(r => r.Team === 'FRIENDLY');
+        const enemyReports = reports.filter(r => r.Team === 'ENEMY');
+
+        function groupReportsByTime(reportList) {
+            const grouped = new Map();
+            reportList.forEach(report => {
+                const time = parseTimeToMinutes(report.Time);
+                const timeKey = Math.floor(time * 60);
+                if (!grouped.has(timeKey)) {
+                    grouped.set(timeKey, []);
+                }
+                grouped.get(timeKey).push({ ...report, time });
+            });
+            return grouped;
+        }
+
+        const friendlyGroups = groupReportsByTime(friendlyReports);
+        const enemyGroups = groupReportsByTime(enemyReports);
+        
+        const maxCandidatesPerReport = Math.max(...reports.map(r => (r.Candidates && r.Candidates.length > 0) ? r.Candidates.length : 1), 1);
+        const maxReportsPerTimestamp = Math.max(
+            ...Array.from(friendlyGroups.values()).map(g => g.length),
+            ...Array.from(enemyGroups.values()).map(g => g.length),
+            1
+        );
+        const maxStackHeight = maxReportsPerTimestamp * maxCandidatesPerReport * (iconSize + iconSpacing) + iconSpacing * 2;
+        const teamRegionHeight = Math.max(120, maxStackHeight);
+        const totalHeight = padding.top + teamRegionHeight * 2 + padding.bottom;
+        
+        const containerWidth = Math.max(timelineGraphContainer.clientWidth || 1200, 800);
+        const devicePixelRatio = window.devicePixelRatio || 1;
+        canvas.width = containerWidth * devicePixelRatio;
+        canvas.height = totalHeight * devicePixelRatio;
+        canvas.style.width = '100%';
+        canvas.style.height = `${totalHeight}px`;
+        ctx.scale(devicePixelRatio, devicePixelRatio);
+        
+        const graphWidth = containerWidth - padding.left - padding.right;
+        const graphHeight = totalHeight - padding.top - padding.bottom;
+
+        function getCircleCenter(pos) {
+            return {
+                x: pos.x,
+                y: pos.y + iconSize / 2
+            };
+        }
+
+        function getDistance(pos1, pos2) {
+            const center1 = getCircleCenter(pos1);
+            const center2 = getCircleCenter(pos2);
+            const dx = center1.x - center2.x;
+            const dy = center1.y - center2.y;
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+
+        function resolveOverlaps(positions, radius, minY, maxY) {
+            const sorted = [...positions].sort((a, b) => {
+                const xDiff = Math.abs(a.x - b.x);
+                if (xDiff < 1) {
+                    return a.y - b.y;
+                }
+                return a.x - b.x;
+            });
+
+            const xThreshold = radius * 1.5;
+            const minSeparation = radius * 2 + iconSpacing;
+
+            const groups = new Map();
+            sorted.forEach((pos, idx) => {
+                let foundGroup = false;
+                for (const [groupX, group] of groups.entries()) {
+                    if (Math.abs(pos.x - groupX) < xThreshold) {
+                        group.push(idx);
+                        foundGroup = true;
+                        break;
+                    }
+                }
+                if (!foundGroup) {
+                    groups.set(pos.x, [idx]);
+                }
+            });
+
+            groups.forEach((indices) => {
+                indices.sort((a, b) => sorted[a].y - sorted[b].y);
+                let currentY = minY + 10;
+                indices.forEach(idx => {
+                    sorted[idx].y = currentY;
+                    const candidateCount = (sorted[idx].report.Candidates && sorted[idx].report.Candidates.length > 0) ? sorted[idx].report.Candidates.length : 1;
+                    currentY += (iconSize + iconSpacing) * candidateCount;
+                });
+            });
+
+            const maxIterations = 500;
+            const damping = 0.9;
+            const minForce = 0.1;
+
+            for (let iter = 0; iter < maxIterations; iter++) {
+                let totalMovement = 0;
+                const forces = new Array(sorted.length).fill(0);
+
+                for (let i = 0; i < sorted.length; i++) {
+                    for (let j = i + 1; j < sorted.length; j++) {
+                        const distance = getDistance(sorted[i], sorted[j]);
+                        
+                        if (distance < minSeparation) {
+                            const center1 = getCircleCenter(sorted[i]);
+                            const center2 = getCircleCenter(sorted[j]);
+                            const dx = center1.x - center2.x;
+                            const dy = center1.y - center2.y;
+                            
+                            if (distance > 0.001) {
+                                const overlap = minSeparation - distance;
+                                const force = (overlap / distance) * 1.5;
+                                const forceY = (dy / distance) * force;
+                                
+                                forces[i] += forceY;
+                                forces[j] -= forceY;
+                            } else {
+                                const pushY = (minSeparation / 2) + iconSpacing;
+                                if (sorted[i].y < sorted[j].y) {
+                                    forces[i] -= pushY;
+                                    forces[j] += pushY;
+                                } else {
+                                    forces[i] += pushY;
+                                    forces[j] -= pushY;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for (let i = 0; i < sorted.length; i++) {
+                    if (Math.abs(forces[i]) > minForce) {
+                        const newY = sorted[i].y + forces[i] * damping;
+                        const clampedY = Math.max(minY, Math.min(maxY - iconSize, newY));
+                        const movement = Math.abs(clampedY - sorted[i].y);
+                        totalMovement += movement;
+                        sorted[i].y = clampedY;
+                    }
+                }
+
+                if (totalMovement < 0.01) break;
+            }
+
+            for (let i = 0; i < sorted.length; i++) {
+                for (let j = i + 1; j < sorted.length; j++) {
+                    const distance = getDistance(sorted[i], sorted[j]);
+                    if (distance < minSeparation - 0.5) {
+                        const center1 = getCircleCenter(sorted[i]);
+                        const center2 = getCircleCenter(sorted[j]);
+                        const dy = center1.y - center2.y;
+                        const neededSeparation = minSeparation - distance;
+                        
+                        if (Math.abs(dy) < iconSize) {
+                            if (sorted[i].y < sorted[j].y) {
+                                sorted[i].y = Math.max(minY, sorted[i].y - neededSeparation / 2);
+                                sorted[j].y = Math.min(maxY - iconSize, sorted[j].y + neededSeparation / 2);
+                            } else {
+                                sorted[j].y = Math.max(minY, sorted[j].y - neededSeparation / 2);
+                                sorted[i].y = Math.min(maxY - iconSize, sorted[i].y + neededSeparation / 2);
+                            }
+                        }
+                    }
+                }
+            }
+
+            return sorted;
+        }
+
+        const prioritizedHues = [
+            0,    // Red (primary)
+            30,   // Orange (primary)
+            60,   // Yellow (primary)
+            120,  // Green (primary)
+            180,  // Cyan (primary)
+            240,  // Blue (primary)
+            270,  // Violet (primary)
+            300,  // Magenta (primary)
+            15,   // Red-Orange (secondary)
+            45,   // Orange-Yellow (secondary)
+            90,   // Yellow-Green (secondary)
+            150,  // Green-Cyan (secondary)
+            210,  // Cyan-Blue (secondary)
+            255,  // Blue-Violet (secondary)
+            285,  // Violet-Magenta (secondary)
+            315,  // Magenta-Red (secondary)
+            7,    // Red-RedOrange (tertiary)
+            22,   // RedOrange-Orange (tertiary)
+            37,   // Orange-OrangeYellow (tertiary)
+            52,   // OrangeYellow-Yellow (tertiary)
+            75,   // Yellow-YellowGreen (tertiary)
+            105,  // YellowGreen-Green (tertiary)
+            135,  // Green-GreenCyan (tertiary)
+            165,  // GreenCyan-Cyan (tertiary)
+            195,  // Cyan-CyanBlue (tertiary)
+            225,  // CyanBlue-Blue (tertiary)
+            247,  // Blue-BlueViolet (tertiary)
+            262,  // BlueViolet-Violet (tertiary)
+            277,  // Violet-VioletMagenta (tertiary)
+            292,  // VioletMagenta-Magenta (tertiary)
+            307,  // Magenta-MagentaRed (tertiary)
+            330,  // MagentaRed-Red (tertiary)
+            345,  // Red-MagentaRed (tertiary)
+            3,    // More fine shades
+            11,
+            18,
+            26,
+            33,
+            41,
+            48,
+            56,
+            67,
+            82,
+            97,
+            112,
+            127,
+            142,
+            157,
+            172,
+            187,
+            202,
+            217,
+            232,
+            243,
+            250,
+            258,
+            265,
+            272,
+            279,
+            286,
+            293,
+            310,
+            320,
+            335,
+            350
+        ];
+        
+        const usedHueIndices = new Set();
+        const reportColors = new Map();
+        
+        function generateReportColor(report) {
+            const seed = `${report.Time}_${report.Slot}_${report.SteamID}`;
+            let hash = 0;
+            for (let i = 0; i < seed.length; i++) {
+                hash = ((hash << 5) - hash) + seed.charCodeAt(i);
+                hash = hash & hash;
+            }
+            const preferredIndex = Math.abs(hash) % prioritizedHues.length;
+            return preferredIndex;
+        }
+        
+        reports.forEach(report => {
+            const reportKey = `${report.Time}_${report.Slot}_${report.SteamID}`;
+            if (!reportColors.has(reportKey)) {
+                const preferredIndex = generateReportColor(report);
+                let assignedIndex = preferredIndex;
+                
+                if (usedHueIndices.has(assignedIndex)) {
+                    let foundUnused = false;
+                    for (let i = 0; i < prioritizedHues.length; i++) {
+                        const checkIndex = (assignedIndex + i) % prioritizedHues.length;
+                        if (!usedHueIndices.has(checkIndex)) {
+                            assignedIndex = checkIndex;
+                            foundUnused = true;
+                            break;
+                        }
+                    }
+                    if (!foundUnused) {
+                        usedHueIndices.clear();
+                    }
+                }
+                
+                usedHueIndices.add(assignedIndex);
+                const hueValue = prioritizedHues[assignedIndex];
+                const finalColor = `hsl(${hueValue}, 100%, 50%)`;
+                reportColors.set(reportKey, finalColor);
+            }
+        });
+
+        const iconPositions = [];
+        const friendlyYByX = new Map();
+        const enemyYByX = new Map();
+        
+        friendlyGroups.forEach((reportGroup) => {
+            const reports = reportGroup.sort((a, b) => a.time - b.time);
+            const time = reports[0].time;
+            const x = padding.left + (time / timeRange) * graphWidth;
+            
+            let currentY = friendlyYByX.get(x) || padding.top + 10;
+            
+            reports.forEach((report) => {
+                const candidateCount = (report.Candidates && report.Candidates.length > 0) ? report.Candidates.length : 1;
+                iconPositions.push({ report, x, y: currentY, team: 'FRIENDLY' });
+                currentY += (iconSize + iconSpacing) * candidateCount;
+            });
+            
+            friendlyYByX.set(x, currentY);
+        });
+        
+        enemyGroups.forEach((reportGroup) => {
+            const reports = reportGroup.sort((a, b) => a.time - b.time);
+            const time = reports[0].time;
+            const x = padding.left + (time / timeRange) * graphWidth;
+            
+            let currentY = enemyYByX.get(x) || padding.top + teamRegionHeight + 10;
+            
+            reports.forEach((report) => {
+                const candidateCount = (report.Candidates && report.Candidates.length > 0) ? report.Candidates.length : 1;
+                iconPositions.push({ report, x, y: currentY, team: 'ENEMY' });
+                currentY += (iconSize + iconSpacing) * candidateCount;
+            });
+            
+            enemyYByX.set(x, currentY);
+        });
+
+        const friendlyPositions = iconPositions.filter(p => p.team === 'FRIENDLY');
+        const enemyPositions = iconPositions.filter(p => p.team === 'ENEMY');
+        
+        const radius = iconSize / 2;
+        const friendlyResolved = resolveOverlaps(friendlyPositions, radius, padding.top, padding.top + teamRegionHeight);
+        const enemyResolved = resolveOverlaps(enemyPositions, radius, padding.top + teamRegionHeight, padding.top + teamRegionHeight * 2);
+        
+        iconPositions.length = 0;
+        iconPositions.push(...friendlyResolved, ...enemyResolved);
+
+        const imagesToLoad = new Set();
+        iconPositions.forEach(pos => {
+            if (pos.report.Candidates && pos.report.Candidates.length > 0) {
+                pos.report.Candidates.forEach(candidate => {
+                    const heroName = candidate.Hero ? candidate.Hero.trim() : '';
+                    if (heroName && heroName.toLowerCase() !== 'unknown') {
+                        const iconUrl = getHeroIconUrl(heroName);
+                        if (iconUrl) imagesToLoad.add(iconUrl);
+                    }
+                });
+            } else {
+                const heroName = pos.report.TargetHero ? pos.report.TargetHero.trim() : '';
+                if (heroName && heroName.toLowerCase() !== 'unknown') {
+                    const iconUrl = getHeroIconUrl(heroName);
+                    if (iconUrl) imagesToLoad.add(iconUrl);
+                }
+            }
+        });
+
+        const imageCache = new Map();
+        let imagesLoaded = 0;
+        const totalImages = imagesToLoad.size;
+
+        function drawIcons() {
+            ctx.clearRect(0, 0, containerWidth, totalHeight);
+            ctx.fillStyle = '#0f172a';
+            ctx.fillRect(0, 0, containerWidth, totalHeight);
+
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(padding.left, padding.top);
+            ctx.lineTo(padding.left, totalHeight - padding.bottom);
+            ctx.moveTo(padding.left, padding.top + teamRegionHeight);
+            ctx.lineTo(containerWidth - padding.right, padding.top + teamRegionHeight);
+            ctx.moveTo(padding.left, padding.top + teamRegionHeight * 2);
+            ctx.lineTo(containerWidth - padding.right, padding.top + teamRegionHeight * 2);
+            ctx.stroke();
+
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '12px Inter';
+            ctx.textAlign = 'center';
+            ctx.fillText('FRIENDLY', containerWidth / 2, padding.top - 20);
+            ctx.fillText('ENEMY', containerWidth / 2, padding.top + teamRegionHeight + 20);
+
+            const numLabels = Math.min(20, Math.ceil(timeRange / 2));
+            for (let i = 0; i <= numLabels; i++) {
+                const time = (i * timeRange) / numLabels;
+                const x = padding.left + (time / timeRange) * graphWidth;
+                const minutes = Math.floor(time);
+                const seconds = Math.floor((time - minutes) * 60);
+                const timeLabel = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+                
+                ctx.strokeStyle = '#475569';
+                ctx.lineWidth = 0.5;
+                ctx.beginPath();
+                ctx.moveTo(x, padding.top);
+                ctx.lineTo(x, totalHeight - padding.bottom);
+                ctx.stroke();
+                
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = '11px Inter';
+                ctx.textAlign = 'center';
+                ctx.fillText(timeLabel, x, totalHeight - padding.bottom + 18);
+            }
+
+            iconPositions.forEach(({ report, x, y, team }) => {
+                const candidates = report.Candidates && report.Candidates.length > 0 ? report.Candidates : null;
+                const reportKey = `${report.Time}_${report.Slot}_${report.SteamID}`;
+                const tintColor = reportColors.get(reportKey) || '#94a3b8';
+                
+                if (candidates) {
+                    const maxScore = Math.max(...candidates.map(c => c.Score));
+                    const isCertain = candidates.length === 1;
+                    
+                    candidates.forEach((candidate, idx) => {
+                        const heroNameRaw = candidate.Hero ? candidate.Hero.trim() : '';
+                        const heroName = heroNameRaw && heroNameRaw.toLowerCase() !== 'unknown' ? heroNameRaw : null;
+                        const iconUrl = heroName ? getHeroIconUrl(heroName) : null;
+                        const img = iconUrl ? imageCache.get(iconUrl) : null;
+                        
+                        const positionBasedOpacity = [1.0, 0.5, 0.25];
+                        const opacity = idx < positionBasedOpacity.length ? positionBasedOpacity[idx] : Math.max(0.2, 1.0 - (idx * 0.25));
+                        const sizeScale = [1.0, 0.8, 0.6];
+                        const scale = idx < sizeScale.length ? sizeScale[idx] : Math.max(0.4, 1.0 - (idx * 0.2));
+                        const scaledIconSize = iconSize * scale;
+                        const baseY = y + (idx * (iconSize + iconSpacing));
+                        const borderY = baseY + iconSize / 2;
+                        const iconCenterY = borderY;
+                        const isSelected = idx === (report.SelectedCandidateIndex || 0) || isCertain;
+                        
+                        const borderRadius = scaledIconSize / 2;
+                        const borderX = x;
+                        
+                        ctx.save();
+                        ctx.globalAlpha = opacity;
+                        
+                        if (img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+                            ctx.beginPath();
+                            ctx.arc(borderX, iconCenterY, borderRadius, 0, Math.PI * 2);
+                            ctx.clip();
+                            ctx.drawImage(img, borderX - scaledIconSize / 2, iconCenterY - scaledIconSize / 2, scaledIconSize, scaledIconSize);
+                        } else {
+                            ctx.fillStyle = '#475569';
+                            ctx.beginPath();
+                            ctx.arc(borderX, iconCenterY, borderRadius, 0, Math.PI * 2);
+                            ctx.fill();
+                            ctx.fillStyle = '#f1f5f9';
+                            ctx.font = `${10 * scale}px Inter`;
+                            ctx.textAlign = 'center';
+                            ctx.fillText(heroName ? heroName.substring(0, 3).toUpperCase() : '?', borderX, iconCenterY + 3 * scale);
+                        }
+                        
+                        ctx.restore();
+                        
+                        ctx.save();
+                        ctx.globalAlpha = 1.0;
+                        ctx.globalCompositeOperation = 'source-over';
+                        
+                        if (isSelected) {
+                            ctx.strokeStyle = '#0f172a';
+                            ctx.lineWidth = 5;
+                            ctx.lineCap = 'round';
+                            ctx.lineJoin = 'round';
+                            ctx.beginPath();
+                            ctx.arc(borderX, iconCenterY, borderRadius, 0, Math.PI * 2);
+                            ctx.stroke();
+                            
+                            ctx.strokeStyle = '#000000';
+                            ctx.lineWidth = 3;
+                            ctx.beginPath();
+                            ctx.arc(borderX, iconCenterY, borderRadius, 0, Math.PI * 2);
+                            ctx.stroke();
+                            
+                            ctx.strokeStyle = tintColor;
+                            ctx.lineWidth = 2;
+                            ctx.beginPath();
+                            ctx.arc(borderX, iconCenterY, borderRadius, 0, Math.PI * 2);
+                            ctx.stroke();
+                        } else {
+                            ctx.strokeStyle = '#0f172a';
+                            ctx.lineWidth = 5;
+                            ctx.lineCap = 'round';
+                            ctx.lineJoin = 'round';
+                            ctx.beginPath();
+                            ctx.arc(borderX, iconCenterY, borderRadius, 0, Math.PI * 2);
+                            ctx.stroke();
+                            
+                            ctx.strokeStyle = tintColor;
+                            ctx.lineWidth = 3;
+                            ctx.beginPath();
+                            ctx.arc(borderX, iconCenterY, borderRadius, 0, Math.PI * 2);
+                            ctx.stroke();
+                        }
+                        
+                        ctx.restore();
+                    });
+                } else {
+                    const heroName = (report.TargetHero && report.TargetHero.trim()) ? report.TargetHero : null;
+                    const iconUrl = heroName ? getHeroIconUrl(heroName) : null;
+                    const img = iconUrl ? imageCache.get(iconUrl) : null;
+                    
+                    if (img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.arc(x, y + iconSize / 2, iconSize / 2, 0, Math.PI * 2);
+                        ctx.clip();
+                        ctx.drawImage(img, x - iconSize / 2, y, iconSize, iconSize);
+                        ctx.restore();
+                    } else {
+                        ctx.fillStyle = '#475569';
+                        ctx.beginPath();
+                        ctx.arc(x, y + iconSize / 2, iconSize / 2, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.fillStyle = '#f1f5f9';
+                        ctx.font = '10px Inter';
+                        ctx.textAlign = 'center';
+                        ctx.fillText(heroName ? heroName.substring(0, 3).toUpperCase() : '?', x, y + iconSize / 2 + 3);
+                    }
+                    
+                    ctx.strokeStyle = team === 'FRIENDLY' ? '#22c55e' : '#ef4444';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.arc(x, y + iconSize / 2, iconSize / 2, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+            });
+        }
+
+        console.log('[GRAPH DEBUG] renderPlayerReportsGraph: Calling drawIcons()');
+        drawIcons();
+
+        function showGraph() {
+            hideGraphLoading();
+            requestAnimationFrame(() => {
+                const canvas = timelineGraphContainer.querySelector('canvas');
+                const title = timelineGraphContainer.querySelector('.graph-title');
+                if (canvas) {
+                    canvas.style.opacity = '1';
+                    canvas.style.visibility = 'visible';
+                    canvas.style.display = 'block';
+                }
+                if (title) {
+                    title.style.opacity = '1';
+                    title.style.visibility = 'visible';
+                    title.style.display = 'block';
+                }
+            });
+        }
+
+        let pendingRedraw = false;
+        function scheduleRedraw() {
+            if (!pendingRedraw) {
+                pendingRedraw = true;
+                requestAnimationFrame(() => {
+                    drawIcons();
+                    pendingRedraw = false;
+                });
+            }
+        }
+
+        showGraph();
+
+        console.log('[GRAPH DEBUG] Total images to load:', totalImages);
+        if (totalImages > 0) {
+            imagesToLoad.forEach(iconUrl => {
+                const img = new Image();
+                img.onload = () => {
+                    imageCache.set(iconUrl, img);
+                    imagesLoaded++;
+                    scheduleRedraw();
+                };
+                img.onerror = () => {
+                    imagesLoaded++;
+                };
+                img.src = iconUrl;
+            });
+        }
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = rect.width / containerWidth;
+            const scaleY = rect.height / totalHeight;
+            const x = (e.clientX - rect.left) / scaleX;
+            const y = (e.clientY - rect.top) / scaleY;
+            
+            const iconRadius = iconSize / 2;
+            let hoveredIcon = null;
+            let hoveredCandidateIndex = -1;
+            
+            for (const pos of iconPositions) {
+                const candidates = pos.report.Candidates && pos.report.Candidates.length > 0 ? pos.report.Candidates : null;
+                
+                if (candidates) {
+                    for (let idx = 0; idx < candidates.length; idx++) {
+                        const candidateY = pos.y + (idx * (iconSize + iconSpacing));
+                        const centerX = pos.x;
+                        const centerY = candidateY + iconSize / 2;
+                        const dx = x - centerX;
+                        const dy = y - centerY;
+                        const distance = Math.sqrt(dx * dx + dy * dy);
+                        
+                        if (distance <= iconRadius) {
+                            hoveredIcon = pos;
+                            hoveredCandidateIndex = idx;
+                            break;
+                        }
+                    }
+                    if (hoveredIcon) break;
+                } else {
+                    const centerX = pos.x;
+                    const centerY = pos.y + iconSize / 2;
+                    const dx = x - centerX;
+                    const dy = y - centerY;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    if (distance <= iconRadius) {
+                        hoveredIcon = pos;
+                        break;
+                    }
+                }
+            }
+            
+            if (hoveredIcon) {
+                const timestamp = hoveredIcon.report.Time;
+                const candidates = hoveredIcon.report.Candidates && hoveredIcon.report.Candidates.length > 0 ? hoveredIcon.report.Candidates : null;
+                
+                if (candidates) {
+                    const maxScore = Math.max(...candidates.map(c => c.Score));
+                    const candidateLines = candidates.map((cand, idx) => {
+                        const heroNameRaw = cand.Hero ? cand.Hero.trim() : '';
+                        const heroName = heroNameRaw && heroNameRaw.toLowerCase() !== 'unknown' ? heroNameRaw : 'Unknown Hero';
+                        const isSelected = idx === (hoveredIcon.report.SelectedCandidateIndex || 0) || candidates.length === 1;
+                        const scorePercent = maxScore > 0 ? ((cand.Score / maxScore) * 100).toFixed(1) : '0.0';
+                        const marker = isSelected ? '★' : ' ';
+                        return `${marker} ${heroName}: ${cand.Score.toFixed(2)} (${scorePercent}%)`;
+                    }).join('\n');
+                    tooltip.textContent = `${timestamp}\n${candidateLines}`;
+                } else {
+                    const heroNameRaw = hoveredIcon.report.TargetHero ? hoveredIcon.report.TargetHero.trim() : '';
+                    const heroName = heroNameRaw && heroNameRaw.toLowerCase() !== 'unknown' ? heroNameRaw : 'Unknown Hero';
+                    tooltip.textContent = `${heroName}: ${timestamp}`;
+                }
+                tooltip.style.visibility = 'hidden';
+                tooltip.classList.remove('hidden');
+                
+                const tooltipRect = tooltip.getBoundingClientRect();
+                let left = e.clientX + 15;
+                let top = e.clientY - tooltipRect.height - 10;
+                
+                if (left + tooltipRect.width > window.innerWidth - 10) {
+                    left = e.clientX - tooltipRect.width - 15;
+                }
+                if (top < 10) {
+                    top = e.clientY + 15;
+                }
+                
+                tooltip.style.left = `${left}px`;
+                tooltip.style.top = `${top}px`;
+                tooltip.style.visibility = 'visible';
+            } else {
+                tooltip.classList.add('hidden');
+            }
+        });
+        
+        canvas.addEventListener('mouseleave', () => {
+            tooltip.classList.add('hidden');
+        });
+        } catch (error) {
+            console.error('Error rendering player reports graph:', error);
+            timelineGraphContainer.innerHTML = '<p style="text-align: center; color: var(--danger-color); padding: 2rem;">Error rendering graph. Please try again.</p>';
+            hideGraphLoading();
+        }
+    }
+
+    function renderScoreboardActivityGraph(matchData, playerFilter = null) {
+        if (!matchData || !matchData.scoreboardActivities || matchData.scoreboardActivities.length === 0) {
+            timelineGraphContainer.innerHTML = '<p style="text-align: center; color: var(--text-secondary); padding: 2rem;">No scoreboard activity found for this match.</p>';
+            hideGraphLoading();
+            return;
+        }
+
+        let activities = matchData.scoreboardActivities;
+        if (playerFilter) {
+            if (playerFilter.startsWith('slot_')) {
+                const targetSlot = parseInt(playerFilter.replace('slot_', ''));
+                activities = activities.filter(a => a.Slot === targetSlot);
+            } else if (playerFilter.startsWith('steamid_')) {
+                const targetSteamID = playerFilter.replace('steamid_', '');
+                activities = activities.filter(a => String(a.SteamID) === targetSteamID);
+            }
+        }
+
+        if (activities.length === 0) {
+            timelineGraphContainer.innerHTML = '<p style="text-align: center; color: var(--text-secondary); padding: 2rem;">No scoreboard activity found for the selected player.</p>';
+            hideGraphLoading();
+            return;
+        }
+
+        const title = document.createElement('h3');
+        title.className = 'graph-title';
+        title.textContent = 'Scoreboard Activity';
+        title.style.cssText = 'margin: 0 0 1rem 0; color: var(--text-primary); font-size: 1.25rem; font-weight: 600;';
+        
+        const canvas = document.createElement('canvas');
+        canvas.id = 'timeline-graph';
+        const tooltip = document.createElement('div');
+        tooltip.id = 'timeline-tooltip';
+        tooltip.className = 'timeline-tooltip hidden';
+        
+        timelineGraphContainer.innerHTML = '';
+        showGraphLoading();
+        timelineGraphContainer.appendChild(title);
+        timelineGraphContainer.appendChild(canvas);
+        timelineGraphContainer.appendChild(tooltip);
+        
+        canvas.style.opacity = '0';
+        canvas.style.visibility = 'hidden';
+        title.style.opacity = '0';
+        title.style.visibility = 'hidden';
+
+        const ctx = canvas.getContext('2d');
+        const padding = { top: 40, right: 40, bottom: 60, left: 200 };
+        const rowHeight = 50;
+        const rowSpacing = 10;
+        const totalRows = activities.length;
+        const totalHeight = padding.top + (rowHeight + rowSpacing) * totalRows + padding.bottom;
+
+        const containerWidth = Math.max(timelineGraphContainer.clientWidth || 1200, 800);
+        const devicePixelRatio = window.devicePixelRatio || 1;
+        canvas.width = containerWidth * devicePixelRatio;
+        canvas.height = totalHeight * devicePixelRatio;
+        canvas.style.width = '100%';
+        canvas.style.height = `${totalHeight}px`;
+        ctx.scale(devicePixelRatio, devicePixelRatio);
+
+        const graphWidth = containerWidth - padding.left - padding.right;
+        const graphHeight = totalHeight - padding.top - padding.bottom;
+
+        let maxTime = 60;
+        activities.forEach(activity => {
+            activity.TimeRanges.forEach(range => {
+                const endTime = parseTimeToMinutes(range.End);
+                if (endTime > maxTime) maxTime = endTime;
+            });
+        });
+        const timeRange = Math.max(maxTime, 60);
+
+        ctx.clearRect(0, 0, containerWidth, totalHeight);
+        ctx.fillStyle = '#0f172a';
+        ctx.fillRect(0, 0, containerWidth, totalHeight);
+
+        ctx.strokeStyle = '#334155';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(padding.left, padding.top);
+        ctx.lineTo(padding.left, totalHeight - padding.bottom);
+        ctx.moveTo(padding.left, padding.top);
+        ctx.lineTo(containerWidth - padding.right, padding.top);
+        ctx.stroke();
+
+        const numLabels = Math.min(10, Math.ceil(timeRange / 5));
+        for (let i = 0; i <= numLabels; i++) {
+            const time = (i * timeRange) / numLabels;
+            const x = padding.left + (time / timeRange) * graphWidth;
+            const minutes = Math.floor(time);
+            const seconds = Math.floor((time - minutes) * 60);
+            const timeLabel = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+
+            ctx.strokeStyle = '#475569';
+            ctx.lineWidth = 0.5;
+            ctx.beginPath();
+            ctx.moveTo(x, padding.top);
+            ctx.lineTo(x, totalHeight - padding.bottom);
+            ctx.stroke();
+
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '9px Inter';
+            ctx.textAlign = 'center';
+            ctx.fillText(timeLabel, x, totalHeight - padding.bottom + 16);
+        }
+
+        const imagesToLoad = new Set();
+        activities.forEach(activity => {
+            if (activity.Hero) {
+                const iconUrl = getHeroIconUrl(activity.Hero);
+                if (iconUrl) imagesToLoad.add(iconUrl);
+            }
+        });
+
+        const imageCache = new Map();
+        let imagesLoaded = 0;
+        const totalImages = imagesToLoad.size;
+
+        function drawBars() {
+            activities.forEach((activity, index) => {
+                const y = padding.top + index * (rowHeight + rowSpacing);
+                const playerColor = getSlotColor(activity.Slot);
+                const teamLabel = activity.Team === 2 ? 'RADIANT' : 'DIRE';
+
+                ctx.fillStyle = '#1e293b';
+                ctx.fillRect(padding.left, y, graphWidth, rowHeight);
+
+                ctx.strokeStyle = '#334155';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(padding.left, y, graphWidth, rowHeight);
+
+                activity.TimeRanges.forEach(range => {
+                    const startTime = parseTimeToMinutes(range.Start);
+                    const endTime = parseTimeToMinutes(range.End);
+                    const startX = padding.left + (startTime / timeRange) * graphWidth;
+                    const endX = padding.left + (endTime / timeRange) * graphWidth;
+                    const barWidth = endX - startX;
+
+                    ctx.fillStyle = playerColor;
+                    ctx.globalAlpha = 0.6;
+                    ctx.fillRect(startX, y + 5, barWidth, rowHeight - 10);
+                    ctx.globalAlpha = 1.0;
+
+                    ctx.strokeStyle = playerColor;
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(startX, y + 5, barWidth, rowHeight - 10);
+                });
+
+                ctx.fillStyle = '#f1f5f9';
+                ctx.font = '12px Inter';
+                ctx.textAlign = 'left';
+                const playerName = activity.Name || `Slot ${activity.Slot}`;
+                ctx.fillText(playerName, 10, y + rowHeight / 2 + 4);
+
+                ctx.fillStyle = '#64748b';
+                ctx.font = '10px Inter';
+                ctx.fillText(teamLabel, 10, y + rowHeight - 5);
+
+                if (activity.Hero) {
+                    const iconUrl = getHeroIconUrl(activity.Hero);
+                    const img = iconUrl ? imageCache.get(iconUrl) : null;
+                    const iconSize = 32;
+                    const iconX = padding.left - iconSize - 10;
+                    const iconY = y + (rowHeight - iconSize) / 2;
+
+                    if (img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.arc(iconX + iconSize / 2, iconY + iconSize / 2, iconSize / 2, 0, Math.PI * 2);
+                        ctx.clip();
+                        ctx.drawImage(img, iconX, iconY, iconSize, iconSize);
+                        ctx.restore();
+                    } else {
+                        ctx.fillStyle = '#475569';
+                        ctx.beginPath();
+                        ctx.arc(iconX + iconSize / 2, iconY + iconSize / 2, iconSize / 2, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.fillStyle = '#f1f5f9';
+                        ctx.font = '9px Inter';
+                        ctx.textAlign = 'center';
+                        ctx.fillText(activity.Hero ? activity.Hero.substring(0, 3).toUpperCase() : '?', iconX + iconSize / 2, iconY + iconSize / 2 + 3);
+                    }
+                }
+            });
+        }
+
+        drawBars();
+
+        function showScoreboardGraphWhenReady() {
+            hideGraphLoading();
+            requestAnimationFrame(() => {
+                const canvas = timelineGraphContainer.querySelector('canvas');
+                const title = timelineGraphContainer.querySelector('.graph-title');
+                if (canvas) {
+                    canvas.style.opacity = '1';
+                    canvas.style.visibility = 'visible';
+                    canvas.style.display = 'block';
+                }
+                if (title) {
+                    title.style.opacity = '1';
+                    title.style.visibility = 'visible';
+                    title.style.display = 'block';
+                }
+            });
+        }
+
+        if (totalImages > 0) {
+            imagesToLoad.forEach(iconUrl => {
+                const img = new Image();
+                img.onload = () => {
+                    imageCache.set(iconUrl, img);
+                    imagesLoaded++;
+                    if (imagesLoaded === totalImages) {
+                        drawBars();
+                        showScoreboardGraphWhenReady();
+                    } else if (imagesLoaded % 3 === 0) {
+                        drawBars();
+                    }
+                };
+                img.onerror = () => {
+                    imagesLoaded++;
+                    if (imagesLoaded === totalImages) {
+                        drawBars();
+                        showScoreboardGraphWhenReady();
+                    }
+                };
+                img.src = iconUrl;
+            });
+        } else {
+            showScoreboardGraphWhenReady();
+        }
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = rect.width / containerWidth;
+            const scaleY = rect.height / totalHeight;
+            const x = (e.clientX - rect.left) / scaleX;
+            const y = (e.clientY - rect.top) / scaleY;
+
+            let hoveredActivity = null;
+            let hoveredRange = null;
+            let closestDistance = Infinity;
+
+            activities.forEach((activity, index) => {
+                const rowY = padding.top + index * (rowHeight + rowSpacing);
+                const rowBottom = rowY + rowHeight;
+                const verticalTolerance = rowHeight * 0.5;
+                
+                if (y >= rowY - verticalTolerance && y <= rowBottom + verticalTolerance && x >= padding.left && x <= padding.left + graphWidth) {
+                    activity.TimeRanges.forEach(range => {
+                        const startTime = parseTimeToMinutes(range.Start);
+                        const endTime = parseTimeToMinutes(range.End);
+                        const startX = padding.left + (startTime / timeRange) * graphWidth;
+                        const endX = padding.left + (endTime / timeRange) * graphWidth;
+                        const barWidth = endX - startX;
+                        
+                        const horizontalTolerance = Math.max(10, barWidth * 0.3);
+                        const expandedStartX = startX - horizontalTolerance;
+                        const expandedEndX = endX + horizontalTolerance;
+                        
+                        if (x >= expandedStartX && x <= expandedEndX) {
+                            const centerX = (startX + endX) / 2;
+                            const distance = Math.abs(x - centerX);
+                            
+                            if (distance < closestDistance) {
+                                closestDistance = distance;
+                                hoveredActivity = activity;
+                                hoveredRange = range;
+                            }
+                        }
+                    });
+                }
+            });
+
+            if (hoveredActivity && hoveredRange) {
+                const playerName = hoveredActivity.Name || `Slot ${hoveredActivity.Slot}`;
+                tooltip.textContent = `${playerName}: ${hoveredRange.Start} - ${hoveredRange.End}`;
+                tooltip.style.visibility = 'hidden';
+                tooltip.classList.remove('hidden');
+
+                const tooltipRect = tooltip.getBoundingClientRect();
+                let left = e.clientX + 15;
+                let top = e.clientY - tooltipRect.height - 10;
+
+                if (left + tooltipRect.width > window.innerWidth - 10) {
+                    left = e.clientX - tooltipRect.width - 15;
+                }
+                if (top < 10) {
+                    top = e.clientY + 15;
+                }
+
+                tooltip.style.left = `${left}px`;
+                tooltip.style.top = `${top}px`;
+                tooltip.style.visibility = 'visible';
+            } else {
+                tooltip.classList.add('hidden');
+            }
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            tooltip.classList.add('hidden');
+        });
+    }
+
     function renderPlayerSelector() {
         playerSelectorDropdown.innerHTML = '';
         
@@ -2441,10 +3928,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function selectPlayerOption(key) {
+        console.log(`[FRONTEND] selectPlayerOption called with key: "${key}"`);
         currentSelectedPlayer = key || null;
         const option = playerSelectorOptions.find(o => o.key === key);
         
         if (option) {
+            console.log(`[FRONTEND] Found option for key "${key}":`, { slot: option.slot, name: option.name, reportCount: option.reportCount });
             const iconUrl = option.hero ? getHeroIconUrl(option.hero) : null;
             const playerColor = getSlotColor(option.slot);
             
@@ -2463,8 +3952,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         
         const matchIndex = parseInt(matchSelector.value);
+        console.log(`[FRONTEND] Rendering graph with matchIndex: ${matchIndex}, playerFilter: "${currentSelectedPlayer}", currentGraphView: "${currentGraphView}"`);
         if (matchIndex >= 0 && matchIndex < allMatchData.length) {
-            renderTimelineGraph(allMatchData[matchIndex], currentSelectedPlayer);
+            renderCurrentGraph(allMatchData[matchIndex], currentSelectedPlayer);
             updateGraphsForPlayer(currentSelectedPlayer);
         }
     }
@@ -2479,6 +3969,35 @@ document.addEventListener('DOMContentLoaded', () => {
             playerSelectorDropdown.classList.add('hidden');
         }
     });
+
+    graphViewTabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            const newView = tab.dataset.view;
+            if (newView === currentGraphView) return;
+            
+            const canvas = timelineGraphContainer.querySelector('canvas');
+            const title = timelineGraphContainer.querySelector('.graph-title');
+            if (canvas) canvas.style.opacity = '0';
+            if (title) title.style.opacity = '0';
+            showGraphLoading();
+            
+            currentGraphView = newView;
+            updateGraphViewTabs();
+            
+            const matchIndex = parseInt(matchSelector.value);
+            if (matchIndex >= 0 && matchIndex < allMatchData.length) {
+                populatePlayerSelector(allMatchData[matchIndex]).then(() => {
+                    if (currentSelectedPlayer) {
+                        selectPlayerOption(currentSelectedPlayer);
+                    } else {
+                        renderCurrentGraph(allMatchData[matchIndex], currentSelectedPlayer);
+                    }
+                });
+            }
+        });
+    });
+    
+    updateGraphViewTabs();
 
     matchSelector.addEventListener('change', (e) => {
         const index = parseInt(e.target.value);
@@ -2513,7 +4032,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             console.log('Falling back to slot 0:', slot0Player);
                             selectPlayerOption(slot0Player.key);
                         } else {
-                            renderTimelineGraph(allMatchData[index], null);
+                            renderCurrentGraph(allMatchData[index], null);
                             updateGraphsForPlayer(null);
                         }
                     }

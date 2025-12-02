@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -23,24 +24,50 @@ type PlayerResource struct {
 	Hero     string `json:"Hero"`
 }
 
+type Candidate struct {
+	Slot    int     `json:"Slot"`
+	SteamID uint64  `json:"SteamID"`
+	Name    string  `json:"Name"`
+	Hero    string  `json:"Hero"`
+	Score   float64 `json:"Score"`
+}
+
 type Report struct {
-	Time          string
-	Team          string // "FRIENDLY" or "ENEMY"
-	SteamID       uint64
-	Slot          int
-	Name          string
-	Hero          string
-	TargetSlot    int    `json:"TargetSlot"`    // The slot of the player who was reported
-	TargetSteamID uint64 `json:"TargetSteamID"` // The SteamID of the player who was reported
-	TargetName    string `json:"TargetName"`    // The name of the player who was reported
-	TargetHero    string `json:"TargetHero"`    // The hero of the player who was reported
+	Time                   string      `json:"Time"`
+	Team                   string      `json:"Team"` // "FRIENDLY" or "ENEMY"
+	SteamID                uint64      `json:"SteamID"`
+	Slot                   int         `json:"Slot"`
+	Name                   string      `json:"Name"`
+	Hero                   string      `json:"Hero"`
+	TargetSlot             int         `json:"TargetSlot"`                       // The slot of the player who was reported
+	TargetSteamID          uint64      `json:"TargetSteamID"`                    // The SteamID of the player who was reported
+	TargetName             string      `json:"TargetName"`                       // The name of the player who was reported
+	TargetHero             string      `json:"TargetHero"`                       // The hero of the player who was reported
+	Candidates             []Candidate `json:"Candidates,omitempty"`             // Top candidates with scores
+	SelectedCandidateIndex int         `json:"SelectedCandidateIndex,omitempty"` // Index of selected candidate
+}
+
+type TimeRange struct {
+	Start string `json:"Start"` // Format: "MM:SS"
+	End   string `json:"End"`   // Format: "MM:SS"
+}
+
+type ScoreboardActivity struct {
+	SteamID    uint64      `json:"SteamID"`
+	Slot       int         `json:"Slot"`
+	Name       string      `json:"Name"`
+	Hero       string      `json:"Hero"`
+	Team       int32       `json:"Team"` // 2 = radiant, 3 = dire
+	TimeRanges []TimeRange `json:"TimeRanges"`
 }
 
 type ParseResult struct {
-	MatchID      int64     `json:"MatchID"`
-	TeamReports  int       `json:"TeamReports"`
-	EnemyReports int       `json:"EnemyReports"`
-	Reports      []*Report `json:"Reports"`
+	MatchID              int64                 `json:"MatchID"`
+	TeamReports          int                   `json:"TeamReports"`
+	EnemyReports         int                   `json:"EnemyReports"`
+	Reports              []*Report             `json:"Reports"`
+	ScoreboardActivities []*ScoreboardActivity `json:"scoreboardActivities"`
+	Players              []PlayerResource      `json:"Players"`
 }
 
 // reader performs read operations against a buffer
@@ -349,13 +376,22 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 	fmt.Printf("[PARSER] Starting ParseReplay - matchID: %d, reportedSlot: %d, reportedSteamID: %d\n", matchID, reportedSlot, reportedSteamID)
 
 	var player_resources [10]PlayerResource
+	for i := 0; i < 10; i++ {
+		player_resources[i].Slot = i
+	}
 
 	var teamReports int = 0
 	var enemyReports int = 0
 
 	var current_tick int = 0
 	var begin_tick int = 0
-	var scoreboardOpen map[uint64]bool //steamid as index
+	const minHoverDuration = 3                           // Minimum hover duration in ticks for a session to be considered valid
+	const validReportWindowSeconds = 4                   // Maximum time window in seconds for a valid report (converted to ticks: 4s * 30 ticks/sec = 120 ticks)
+	const durationWeight = 0.7                           // Weight for duration in report attribution scoring
+	const recencyWeight = 0.3                            // Weight for recency in report attribution scoring
+	const ticksPerSecond = 30                            // Game tick rate (ticks per second)
+	scoreboardOpenStartTick := make(map[uint64]int)      // steamid -> tick when scoreboard opened
+	scoreboardTimeRanges := make(map[uint64][]TimeRange) // steamid -> list of time ranges
 
 	var reportedTeam int = 2
 	var pausedTicks int = 0
@@ -364,9 +400,14 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 
 	entityCounts := make(map[string]int)
 
-	hoverDurations := make(map[int]map[int]int)      // reporter slot -> target slot -> duration in ticks
-	lastHoverTime := make(map[int]int)               // reporter slot -> last tick any report button was hovered
-	targetLastHoverTime := make(map[int]map[int]int) // reporter slot -> target slot -> last tick this target was hovered
+	hoverDurations := make(map[int]map[int]int)            // reporter slot -> target slot -> max session duration in ticks
+	lastHoverTime := make(map[int]int)                     // reporter slot -> last tick any report button was hovered
+	targetLastHoverTime := make(map[int]map[int]int)       // reporter slot -> target slot -> last tick this target was hovered
+	targetLastValidHoverTime := make(map[int]map[int]int)  // reporter slot -> target slot -> last tick a valid (>=min) session ended
+	targetFirstValidHoverTime := make(map[int]map[int]int) // reporter slot -> target slot -> first tick a valid (>=min) session ended
+	hoverSessionStart := make(map[int]map[int]int)         // reporter slot -> target slot -> tick when current hover session started
+	hoverSessionDurations := make(map[int]map[int][]int)   // reporter slot -> target slot -> list of completed session durations
+	confirmBoxHoverStart := make(map[int]int)              // reporter slot -> tick when confirm box hover started
 
 	heroMapByEntIndex := make(map[uint32]string)
 	heroMapByHandle := make(map[uint32]string)
@@ -390,9 +431,6 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 
 	// If only SteamID is provided, we'll find the slot later
 	// If only slot is provided, we'll find the SteamID later
-
-	// Initialize the map
-	scoreboardOpen = make(map[uint64]bool)
 
 	fmt.Printf("[PARSER] Creating stream parser...\n")
 	p, err := manta.NewStreamParser(file)
@@ -542,6 +580,27 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 		if className == "CDOTAPlayerController" {
 			if steamid, ok2 := e.GetUint64("m_steamID"); ok2 {
 				if name, ok3 := e.GetString("m_iszPlayerName"); ok3 {
+					if statsPanel, ok := e.GetInt32("m_iStatsPanel"); ok {
+						if statsPanel == 1 {
+							if _, exists := scoreboardOpenStartTick[steamid]; !exists {
+								scoreboardOpenStartTick[steamid] = current_tick
+							}
+						} else if statsPanel == 0 {
+							if startTick, exists := scoreboardOpenStartTick[steamid]; exists {
+								if begin_tick > 0 {
+									startMinutes, startSecs := ticksToMinutesAndSeconds(begin_tick, pausedTicks, startTick)
+									endMinutes, endSecs := ticksToMinutesAndSeconds(begin_tick, pausedTicks, current_tick)
+									timeRange := TimeRange{
+										Start: fmt.Sprintf("%02d:%02d", startMinutes, startSecs),
+										End:   fmt.Sprintf("%02d:%02d", endMinutes, endSecs),
+									}
+									scoreboardTimeRanges[steamid] = append(scoreboardTimeRanges[steamid], timeRange)
+								}
+								delete(scoreboardOpenStartTick, steamid)
+							}
+						}
+					}
+
 					parseAllReports := (actualReportedSlot == -1 && actualReportedSteamID == 0)
 					if parseAllReports || steamid != actualReportedSteamID {
 						statsPanel, statsPanelOk := e.GetInt32("m_iStatsPanel")
@@ -555,20 +614,97 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 
 									for i := 0; i < 10; i++ {
 										if player_resources[i].SteamID == steamid {
-											// Initialize hover map for this reporter if needed
+											// Initialize hover maps for this reporter if needed
 											if _, ok := hoverDurations[i]; !ok {
 												hoverDurations[i] = make(map[int]int)
 											}
 											if _, ok := targetLastHoverTime[i]; !ok {
 												targetLastHoverTime[i] = make(map[int]int)
 											}
+											if _, ok := targetLastValidHoverTime[i]; !ok {
+												targetLastValidHoverTime[i] = make(map[int]int)
+											}
+											if _, ok := targetFirstValidHoverTime[i]; !ok {
+												targetFirstValidHoverTime[i] = make(map[int]int)
+											}
+											if _, ok := hoverSessionStart[i]; !ok {
+												hoverSessionStart[i] = make(map[int]int)
+											}
+											if _, ok := hoverSessionDurations[i]; !ok {
+												hoverSessionDurations[i] = make(map[int][]int)
+											}
 
-											// Track hover duration (only when scoreboard is open)
+											// Track hover sessions (only when scoreboard is open)
 											if statsPanelOk && statsPanel == 1 {
 												if targetSlot != -1 && targetSlot != i {
-													hoverDurations[i][targetSlot]++
+													// End any active sessions for other targets (switching targets)
+													for tSlot, sessionStart := range hoverSessionStart[i] {
+														if tSlot != targetSlot && sessionStart > 0 {
+															sessionDuration := current_tick - sessionStart
+															if sessionDuration > 0 {
+																hoverSessionDurations[i][tSlot] = append(hoverSessionDurations[i][tSlot], sessionDuration)
+																if sessionDuration > hoverDurations[i][tSlot] {
+																	hoverDurations[i][tSlot] = sessionDuration
+																}
+																if sessionDuration >= minHoverDuration {
+																	targetLastValidHoverTime[i][tSlot] = current_tick
+																	if _, exists := targetFirstValidHoverTime[i][tSlot]; !exists {
+																		targetFirstValidHoverTime[i][tSlot] = current_tick
+																	}
+																}
+															}
+															delete(hoverSessionStart[i], tSlot)
+														}
+													}
+
+													// Check if this is a new hover session (not currently hovering this target)
+													if _, hasActiveSession := hoverSessionStart[i][targetSlot]; !hasActiveSession {
+														// Start new session
+														hoverSessionStart[i][targetSlot] = current_tick
+													}
 													lastHoverTime[i] = current_tick
 													targetLastHoverTime[i][targetSlot] = current_tick
+												} else {
+													// Cursor is not over any report button - end any active sessions
+													for tSlot, sessionStart := range hoverSessionStart[i] {
+														if sessionStart > 0 {
+															sessionDuration := current_tick - sessionStart
+															if sessionDuration > 0 {
+																hoverSessionDurations[i][tSlot] = append(hoverSessionDurations[i][tSlot], sessionDuration)
+																// Update max duration if this session is longer
+																if sessionDuration > hoverDurations[i][tSlot] {
+																	hoverDurations[i][tSlot] = sessionDuration
+																}
+																if sessionDuration >= minHoverDuration {
+																	targetLastValidHoverTime[i][tSlot] = current_tick
+																	if _, exists := targetFirstValidHoverTime[i][tSlot]; !exists {
+																		targetFirstValidHoverTime[i][tSlot] = current_tick
+																	}
+																}
+															}
+															delete(hoverSessionStart[i], tSlot)
+														}
+													}
+												}
+											} else {
+												// Scoreboard closed - end any active sessions
+												for tSlot, sessionStart := range hoverSessionStart[i] {
+													if sessionStart > 0 {
+														sessionDuration := current_tick - sessionStart
+														if sessionDuration > 0 {
+															hoverSessionDurations[i][tSlot] = append(hoverSessionDurations[i][tSlot], sessionDuration)
+															if sessionDuration > hoverDurations[i][tSlot] {
+																hoverDurations[i][tSlot] = sessionDuration
+															}
+															if sessionDuration >= minHoverDuration {
+																targetLastValidHoverTime[i][tSlot] = current_tick
+																if _, exists := targetFirstValidHoverTime[i][tSlot]; !exists {
+																	targetFirstValidHoverTime[i][tSlot] = current_tick
+																}
+															}
+														}
+														delete(hoverSessionStart[i], tSlot)
+													}
 												}
 											}
 
@@ -576,48 +712,313 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 											inConfirmBox := xpos >= 968 && xpos <= 1159 && ypos >= 844 && ypos <= 889
 
 											if inConfirmBox {
-												if lastTick, exists := lastHoverTime[i]; exists {
-													tickDiff := current_tick - lastTick
-													if tickDiff >= 0 && tickDiff <= 120 {
-														bestTarget := -1
-														maxScore := 0.0
-														mostRecentHoverTime := -1
+												// Track confirm box hover start if this is a new hover session
+												if _, exists := confirmBoxHoverStart[i]; !exists {
+													confirmBoxHoverStart[i] = current_tick
+												}
+												// Finalize any active hover sessions before calculating scores
+												for tSlot, sessionStart := range hoverSessionStart[i] {
+													if sessionStart > 0 {
+														sessionDuration := current_tick - sessionStart
+														if sessionDuration > 0 {
+															hoverSessionDurations[i][tSlot] = append(hoverSessionDurations[i][tSlot], sessionDuration)
+															if sessionDuration > hoverDurations[i][tSlot] {
+																hoverDurations[i][tSlot] = sessionDuration
+															}
+															if sessionDuration >= minHoverDuration {
+																targetLastValidHoverTime[i][tSlot] = current_tick
+																if _, exists := targetFirstValidHoverTime[i][tSlot]; !exists {
+																	targetFirstValidHoverTime[i][tSlot] = current_tick
+																}
+															}
+														}
+														delete(hoverSessionStart[i], tSlot)
+													}
+												}
+											} else {
+												// Cursor left confirm box - check if report should be created
+												// At this point, all hover sessions have been finalized, so we can now determine
+												// which slot was hovered "most recently" by finding the maximum targetLastValidHoverTime value.
+												// Only one slot can be the "most recent" - the one with the highest timestamp.
+												if startTick, exists := confirmBoxHoverStart[i]; exists {
+													confirmBoxHoverDuration := current_tick - startTick
+													minutes, secs := ticksToMinutesAndSeconds(begin_tick, pausedTicks, current_tick)
+													timestamp := fmt.Sprintf("%02d:%02d", minutes, secs)
 
+													fmt.Printf("\n[PARSER] =================== Report Detection (Time: %s) ===================\n", timestamp)
+
+													// Check if any overlapping slots (6/8/9) were hovered
+													hasOverlappingSlots := false
+													for tSlot := range hoverDurations[i] {
+														if tSlot == 6 || tSlot == 7 || tSlot == 8 {
+															hasOverlappingSlots = true
+															break
+														}
+													}
+
+													var earliestFirstHoverTime int = -1
+													var earliestFirstHoverSlot int = -1
+													var mostRecentLastHoverTime int = -1
+													var mostRecentLastHoverSlot int = -1
+
+													if hasOverlappingSlots {
+														// When overlapping slots are present, use first-hover algorithm for ALL slots
+														// Find the earliest first hover time across slots that have recent hover sessions AND are within valid window
+														fmt.Printf("[PARSER] DEBUG: Checking first-hover algorithm - startTick: %d, validWindow: %d ticks\n", startTick, validReportWindowSeconds*ticksPerSecond)
 														for tSlot := range hoverDurations[i] {
-															if targetHoverTime, exists := targetLastHoverTime[i][tSlot]; exists {
-																targetTickDiff := lastTick - targetHoverTime
-																if targetTickDiff >= 0 && targetTickDiff <= 120 {
-																	if targetHoverTime > mostRecentHoverTime {
-																		mostRecentHoverTime = targetHoverTime
+															if _, hasRecentSession := hoverDurations[i][tSlot]; hasRecentSession {
+																var candidateTime int = -1
+																// Try targetFirstValidHoverTime first
+																if targetFirstValidHoverTime[i] != nil {
+																	if firstTime, exists := targetFirstValidHoverTime[i][tSlot]; exists {
+																		tickDiff := startTick - firstTime
+																		fmt.Printf("[PARSER] DEBUG: Slot %d - targetFirstValidHoverTime: %d, tickDiff: %d\n", tSlot, firstTime, tickDiff)
+																		if tickDiff >= 0 && tickDiff <= validReportWindowSeconds*ticksPerSecond {
+																			candidateTime = firstTime
+																		}
+																	}
+																}
+																// Fallback to targetLastValidHoverTime if first is missing or outside window
+																if candidateTime == -1 && targetLastValidHoverTime[i] != nil {
+																	if lastTime, exists := targetLastValidHoverTime[i][tSlot]; exists {
+																		tickDiff := startTick - lastTime
+																		fmt.Printf("[PARSER] DEBUG: Slot %d - fallback to targetLastValidHoverTime: %d, tickDiff: %d\n", tSlot, lastTime, tickDiff)
+																		if tickDiff >= 0 && tickDiff <= validReportWindowSeconds*ticksPerSecond {
+																			candidateTime = lastTime
+																		}
+																	}
+																}
+																if candidateTime >= 0 {
+																	fmt.Printf("[PARSER] DEBUG: Slot %d - candidateTime: %d, inWindow: true\n", tSlot, candidateTime)
+																	if earliestFirstHoverTime == -1 || candidateTime < earliestFirstHoverTime {
+																		earliestFirstHoverTime = candidateTime
+																		earliestFirstHoverSlot = tSlot
+																	}
+																} else {
+																	fmt.Printf("[PARSER] DEBUG: Slot %d - no valid hover time within window\n", tSlot)
+																}
+															}
+														}
+													} else {
+														// When no overlapping slots, use last-hover algorithm for non-overlapping slots
+														// Find the most recent valid hover time across slots that have recent hover sessions AND are within valid window
+														if targetLastValidHoverTime[i] != nil {
+															for tSlot, targetValidHoverTime := range targetLastValidHoverTime[i] {
+																// Only consider non-overlapping slots that have recent hover sessions
+																if tSlot != 7 && tSlot != 8 && tSlot != 9 {
+																	if _, hasRecentSession := hoverDurations[i][tSlot]; hasRecentSession {
+																		// Only consider last hover times that are within the valid window (relative to confirm box entry)
+																		tickDiff := startTick - targetValidHoverTime
+																		if tickDiff >= 0 && tickDiff <= validReportWindowSeconds*ticksPerSecond {
+																			if targetValidHoverTime > mostRecentLastHoverTime {
+																				mostRecentLastHoverTime = targetValidHoverTime
+																				mostRecentLastHoverSlot = tSlot
+																			}
+																		}
 																	}
 																}
 															}
 														}
+													}
 
-														durationWeight := 0.7
-														recencyWeight := 0.3
+													hasNonOverlappingSlots := mostRecentLastHoverTime >= 0
 
-														minHoverDuration := 2
+													// Only create report if hover duration was sufficient and there's been a valid hover session recently
+													// Note: We don't pre-check validReference here - each candidate is validated individually
+													// during scoring, and if no valid candidates exist, bestTarget will remain -1
+													if confirmBoxHoverDuration >= minHoverDuration && (hasOverlappingSlots || hasNonOverlappingSlots) {
+														bestTarget := -1
+														maxScore := 0.0
+
+														type candidate struct {
+															slot                 int
+															duration             int
+															targetTickDiff       int
+															targetValidHoverTick int
+															isLastHovered        int
+															isFirstHovered       int
+															score                float64
+															name                 string
+															hero                 string
+														}
+														var candidates []candidate
+
+														var filteredOutCandidates []candidate
 														for tSlot, duration := range hoverDurations[i] {
+															if duration < minHoverDuration {
+																candName := player_resources[tSlot].Name
+																if candName == "" {
+																	candName = fmt.Sprintf("Slot %d", tSlot)
+																}
+																candHero := player_resources[tSlot].Hero
+																if candHero == "" {
+																	candHero = "Unknown"
+																}
+																filteredOutCandidates = append(filteredOutCandidates, candidate{
+																	slot:     tSlot,
+																	duration: duration,
+																	name:     candName,
+																	hero:     candHero,
+																})
+																continue
+															}
 															if duration >= minHoverDuration {
-																if targetHoverTime, exists := targetLastHoverTime[i][tSlot]; exists {
-																	targetTickDiff := lastTick - targetHoverTime
-																	if targetTickDiff >= 0 && targetTickDiff <= 120 {
-																		isLastHovered := 0
-																		if targetHoverTime == mostRecentHoverTime {
-																			isLastHovered = 1
-																		}
-																		score := float64(duration)*durationWeight + float64(isLastHovered)*recencyWeight*5.0
-																		if score > maxScore {
-																			maxScore = score
-																			bestTarget = tSlot
+																var targetValidHoverTime int
+																var exists bool
+																var isFirstHovered, isLastHovered int
+																var score float64
+
+																if hasOverlappingSlots {
+																	// When overlapping slots are present, use first-hover algorithm for ALL slots
+																	exists = false
+																	// Try targetFirstValidHoverTime first
+																	if targetFirstValidHoverTime[i] != nil {
+																		if targetValidHoverTime, exists = targetFirstValidHoverTime[i][tSlot]; exists {
+																			targetTickDiff := startTick - targetValidHoverTime
+																			if targetTickDiff < 0 || targetTickDiff > validReportWindowSeconds*ticksPerSecond {
+																				exists = false
+																			}
 																		}
 																	}
+																	// Fallback to targetLastValidHoverTime if first is missing or outside window
+																	if !exists && targetLastValidHoverTime[i] != nil {
+																		if targetValidHoverTime, exists = targetLastValidHoverTime[i][tSlot]; exists {
+																			targetTickDiff := startTick - targetValidHoverTime
+																			if targetTickDiff < 0 || targetTickDiff > validReportWindowSeconds*ticksPerSecond {
+																				exists = false
+																			}
+																		}
+																	}
+																	if exists {
+																		targetTickDiff := startTick - targetValidHoverTime
+																		fmt.Printf("[PARSER] DEBUG: Scoring slot %d - targetValidHoverTime: %d, targetTickDiff: %d, inWindow: true\n", tSlot, targetValidHoverTime, targetTickDiff)
+																		isFirstHovered = 0
+																		if earliestFirstHoverTime >= 0 && targetValidHoverTime == earliestFirstHoverTime {
+																			isFirstHovered = 1
+																		}
+																		score = float64(duration)*durationWeight + float64(isFirstHovered)*recencyWeight*5.0
+																	} else {
+																		fmt.Printf("[PARSER] DEBUG: Slot %d filtered out - no valid hover time within window\n", tSlot)
+																		continue
+																	}
+																} else {
+																	// When no overlapping slots, use last-hover algorithm for non-overlapping slots
+																	// Check if this slot's last valid hover time matches the most recent across all slots
+																	// Only one slot will match (the one with the highest targetLastValidHoverTime)
+																	if targetValidHoverTime, exists = targetLastValidHoverTime[i][tSlot]; exists {
+																		targetTickDiff := startTick - targetValidHoverTime
+																		if targetTickDiff >= 0 && targetTickDiff <= validReportWindowSeconds*ticksPerSecond {
+																			isLastHovered = 0
+																			if mostRecentLastHoverTime >= 0 && targetValidHoverTime == mostRecentLastHoverTime {
+																				isLastHovered = 1
+																			}
+																			score = float64(duration)*durationWeight + float64(isLastHovered)*recencyWeight*5.0
+																		} else {
+																			continue
+																		}
+																	} else {
+																		continue
+																	}
+																}
+
+																targetTickDiff := startTick - targetValidHoverTime
+																candName := player_resources[tSlot].Name
+																if candName == "" {
+																	candName = fmt.Sprintf("Slot %d", tSlot)
+																}
+																candHero := player_resources[tSlot].Hero
+																if candHero == "" {
+																	candHero = "Unknown"
+																}
+
+																candidates = append(candidates, candidate{
+																	slot:                 tSlot,
+																	duration:             duration,
+																	targetTickDiff:       targetTickDiff,
+																	targetValidHoverTick: targetValidHoverTime,
+																	isLastHovered:        isLastHovered,
+																	isFirstHovered:       isFirstHovered,
+																	score:                score,
+																	name:                 candName,
+																	hero:                 candHero,
+																})
+
+																if score > maxScore {
+																	maxScore = score
+																	bestTarget = tSlot
 																}
 															}
 														}
 
 														if bestTarget != -1 && bestTarget != i {
+															reporterName := name
+															if reporterName == "" {
+																reporterName = fmt.Sprintf("Slot %d", i)
+															}
+															reporterHero := player_resources[i].Hero
+															if reporterHero == "" {
+																reporterHero = "Unknown"
+															}
+
+															fmt.Printf("[PARSER] Report detection (Time: %s) - Reporter: %s (%s, Slot %d)\n", timestamp, reporterName, reporterHero, i)
+															fmt.Printf("[PARSER] Confirm box hover duration: %d ticks\n", confirmBoxHoverDuration)
+															if hasOverlappingSlots {
+																if earliestFirstHoverSlot >= 0 {
+																	fmt.Printf("[PARSER] Using first-hover algorithm (slots 6/7/8 detected) - Reference: Slot %d at tick %d (earliest first hover)\n", earliestFirstHoverSlot, earliestFirstHoverTime)
+																} else {
+																	fmt.Printf("[PARSER] Using first-hover algorithm (slots 6/7/8 detected) - Reference: earliestFirstHoverTime = %d\n", earliestFirstHoverTime)
+																}
+															} else {
+																if mostRecentLastHoverSlot >= 0 {
+																	fmt.Printf("[PARSER] Using last-hover algorithm - Reference: Slot %d at tick %d (most recent hover)\n", mostRecentLastHoverSlot, mostRecentLastHoverTime)
+																} else {
+																	fmt.Printf("[PARSER] Using last-hover algorithm - Reference: mostRecentLastHoverTime = %d\n", mostRecentLastHoverTime)
+																}
+															}
+															fmt.Printf("[PARSER] Weighting parameters - durationWeight: %.2f, recencyWeight: %.2f, recencyMultiplier: 5.0, minHoverDuration: %d ticks\n", durationWeight, recencyWeight, minHoverDuration)
+															fmt.Printf("[PARSER] Score formula: score = (duration × %.2f) + (recencyBonus × %.2f × 5.0) where recencyBonus = 1 if hover matches reference, else 0\n", durationWeight, recencyWeight)
+
+															if len(filteredOutCandidates) > 0 {
+																fmt.Printf("[PARSER] Filtered out %d candidate(s) due to insufficient hover duration (< %d ticks):\n", len(filteredOutCandidates), minHoverDuration)
+																for _, cand := range filteredOutCandidates {
+																	fmt.Printf("[PARSER]   - Slot %d: %s (%s) - Duration: %d ticks (below minimum of %d)\n", cand.slot, cand.name, cand.hero, cand.duration, minHoverDuration)
+																}
+															}
+
+															fmt.Printf("[PARSER] Found %d candidate(s) for report attribution:\n", len(candidates))
+
+															for _, cand := range candidates {
+																marker := " "
+																if cand.slot == bestTarget {
+																	marker = "★"
+																}
+																sessionCount := 0
+																sessionDetails := ""
+																if sessions, exists := hoverSessionDurations[i][cand.slot]; exists {
+																	sessionCount = len(sessions)
+																	if sessionCount > 0 {
+																		sessionDetails = fmt.Sprintf(" (sessions: %v, max: %d)", sessions, cand.duration)
+																	}
+																}
+																hoverType := "LastHovered"
+																hoverValue := cand.isLastHovered
+																recencyBonus := float64(cand.isLastHovered) * recencyWeight * 5.0
+																if hasOverlappingSlots {
+																	hoverType = "FirstHovered"
+																	hoverValue = cand.isFirstHovered
+																	recencyBonus = float64(cand.isFirstHovered) * recencyWeight * 5.0
+																}
+																durationScore := float64(cand.duration) * durationWeight
+																fmt.Printf("[PARSER]   %s Slot %d: %s (%s) - Duration: %d ticks%s, HoverTick: %d, TickDiff: %d, %s: %d\n",
+																	marker, cand.slot, cand.name, cand.hero, cand.duration, sessionDetails, cand.targetValidHoverTick, cand.targetTickDiff, hoverType, hoverValue)
+																fmt.Printf("[PARSER]     Score breakdown: (%.0f × %.2f) + (%.0f × %.2f × 5.0) = %.2f + %.2f = %.2f\n",
+																	float64(cand.duration), durationWeight, float64(hoverValue), recencyWeight, durationScore, recencyBonus, cand.score)
+															}
+
+															if len(candidates) > 1 {
+																fmt.Printf("[PARSER] Selected Slot %d (Score: %.2f) as best target\n", bestTarget, maxScore)
+															}
+
 															finalTargetSlot := bestTarget
 
 															if finalTargetSlot >= 0 && finalTargetSlot < 10 {
@@ -629,11 +1030,11 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 																	if foundSteamID, exists := playerSteamIDs[finalTargetSlot]; exists && foundSteamID > 0 {
 																		targetSteamID = foundSteamID
 																	} else {
+																		fmt.Printf("[PARSER] =================== End Report Detection (Reason: Target SteamID not found for slot %d) ===================\n\n", finalTargetSlot)
+																		delete(confirmBoxHoverStart, i)
 																		continue
 																	}
 																}
-
-																minutes, secs := ticksToMinutesAndSeconds(begin_tick, pausedTicks, lastTick)
 
 																var reportTeam string
 																if team, okteam := e.GetUint64("m_iTeamNum"); okteam {
@@ -648,47 +1049,111 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 																	}
 																}
 
-																newReport := &Report{
-																	Time:          fmt.Sprintf("%02d:%02d", minutes, secs),
-																	SteamID:       steamid,
-																	Slot:          i,
-																	Name:          name,
-																	Team:          reportTeam,
-																	Hero:          player_resources[i].Hero,
-																	TargetSlot:    finalTargetSlot,
-																	TargetSteamID: targetSteamID,
-																	TargetName:    targetName,
-																	TargetHero:    targetHero,
+																sort.Slice(candidates, func(a, b int) bool {
+																	return candidates[a].score > candidates[b].score
+																})
+
+																topCandidates := make([]Candidate, 0)
+																maxCandidates := 3
+																if len(candidates) < maxCandidates {
+																	maxCandidates = len(candidates)
 																}
+																for idx := 0; idx < maxCandidates; idx++ {
+																	cand := candidates[idx]
+																	candSteamID := player_resources[cand.slot].SteamID
+																	if candSteamID == 0 {
+																		if foundSteamID, exists := playerSteamIDs[cand.slot]; exists && foundSteamID > 0 {
+																			candSteamID = foundSteamID
+																		}
+																	}
+																	topCandidates = append(topCandidates, Candidate{
+																		Slot:    cand.slot,
+																		SteamID: candSteamID,
+																		Name:    cand.name,
+																		Hero:    cand.hero,
+																		Score:   cand.score,
+																	})
+																}
+
+																newReport := &Report{
+																	Time:                   fmt.Sprintf("%02d:%02d", minutes, secs),
+																	SteamID:                steamid,
+																	Slot:                   i,
+																	Name:                   name,
+																	Team:                   reportTeam,
+																	Hero:                   player_resources[i].Hero,
+																	TargetSlot:             finalTargetSlot,
+																	TargetSteamID:          targetSteamID,
+																	TargetName:             targetName,
+																	TargetHero:             targetHero,
+																	Candidates:             topCandidates,
+																	SelectedCandidateIndex: 0,
+																}
+
+																fmt.Printf("[PARSER] Created report - Time: %s, Reporter: %s (Slot %d) -> Target: %s (Slot %d, SteamID: %d)\n",
+																	newReport.Time, newReport.Name, newReport.Slot, newReport.TargetName, newReport.TargetSlot, newReport.TargetSteamID)
+																fmt.Printf("[PARSER] =================== End Report Detection (Reason: Report created successfully) ===================\n\n")
 
 																reports = append(reports, newReport)
 
 																delete(hoverDurations, i)
 																delete(lastHoverTime, i)
 																delete(targetLastHoverTime, i)
+																delete(targetLastValidHoverTime, i)
+																delete(hoverSessionStart, i)
+																delete(hoverSessionDurations, i)
+															} else {
+																fmt.Printf("[PARSER] =================== End Report Detection (Reason: Invalid target slot %d) ===================\n\n", finalTargetSlot)
+															}
+														}
+													} else {
+														var reason string
+														if confirmBoxHoverDuration < minHoverDuration {
+															reason = fmt.Sprintf("Insufficient hover duration (%d ticks < %d ticks minimum)", confirmBoxHoverDuration, minHoverDuration)
+														} else if !hasOverlappingSlots && !hasNonOverlappingSlots {
+															reason = "No valid hover slots detected"
+														} else {
+															reason = "Unknown reason"
+														}
+														fmt.Printf("[PARSER] =================== End Report Detection (Reason: %s) ===================\n\n", reason)
+													}
+													delete(confirmBoxHoverStart, i)
+												}
+											}
+
+											if lastTick, exists := lastHoverTime[i]; exists {
+												if current_tick-lastTick > validReportWindowSeconds*ticksPerSecond {
+													// Finalize any active sessions before clearing
+													for tSlot, sessionStart := range hoverSessionStart[i] {
+														if sessionStart > 0 {
+															sessionDuration := current_tick - sessionStart
+															if sessionDuration > 0 {
+																hoverSessionDurations[i][tSlot] = append(hoverSessionDurations[i][tSlot], sessionDuration)
+																if sessionDuration > hoverDurations[i][tSlot] {
+																	hoverDurations[i][tSlot] = sessionDuration
+																}
+																// Update valid hover time if session meets minimum duration
+																if sessionDuration >= minHoverDuration {
+																	if targetLastValidHoverTime[i] == nil {
+																		targetLastValidHoverTime[i] = make(map[int]int)
+																	}
+																	targetLastValidHoverTime[i][tSlot] = current_tick
+																}
 															}
 														}
 													}
-												}
-											} else if lastTick, exists := lastHoverTime[i]; exists {
-												if current_tick-lastTick > 120 {
 													delete(hoverDurations, i)
 													delete(lastHoverTime, i)
 													delete(targetLastHoverTime, i)
+													delete(targetLastValidHoverTime, i)
+													delete(hoverSessionStart, i)
+													delete(hoverSessionDurations, i)
 												}
 											}
 											break
 										}
 									}
 								}
-							}
-						}
-
-						if statsPanel, ok := e.GetInt32("m_iStatsPanel"); ok {
-							if statsPanel == 1 {
-								scoreboardOpen[steamid] = true
-							} else if statsPanel == 0 {
-								scoreboardOpen[steamid] = false
 							}
 						}
 					}
@@ -893,11 +1358,48 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 		}
 	}
 
+	for steamid, startTick := range scoreboardOpenStartTick {
+		if begin_tick > 0 {
+			startMinutes, startSecs := ticksToMinutesAndSeconds(begin_tick, pausedTicks, startTick)
+			endMinutes, endSecs := ticksToMinutesAndSeconds(begin_tick, pausedTicks, current_tick)
+			timeRange := TimeRange{
+				Start: fmt.Sprintf("%02d:%02d", startMinutes, startSecs),
+				End:   fmt.Sprintf("%02d:%02d", endMinutes, endSecs),
+			}
+			scoreboardTimeRanges[steamid] = append(scoreboardTimeRanges[steamid], timeRange)
+		}
+	}
+
+	fmt.Printf("[PARSER] Scoreboard tracking summary - open ranges: %d, completed ranges: %d\n", len(scoreboardOpenStartTick), len(scoreboardTimeRanges))
+
+	scoreboardActivities := make([]*ScoreboardActivity, 0)
+	for i := 0; i < 10; i++ {
+		if player_resources[i].SteamID > 0 {
+			steamid := player_resources[i].SteamID
+			if ranges, exists := scoreboardTimeRanges[steamid]; exists && len(ranges) > 0 {
+				scoreboardActivities = append(scoreboardActivities, &ScoreboardActivity{
+					SteamID:    steamid,
+					Slot:       i,
+					Name:       player_resources[i].Name,
+					Hero:       player_resources[i].Hero,
+					Team:       player_resources[i].Team,
+					TimeRanges: ranges,
+				})
+			}
+		}
+	}
+	fmt.Printf("[PARSER] Created %d scoreboard activity entries\n", len(scoreboardActivities))
+
+	players := make([]PlayerResource, 10)
+	copy(players[:], player_resources[:])
+
 	return ParseResult{
-		MatchID:      matchID,
-		TeamReports:  teamReports,
-		EnemyReports: enemyReports,
-		Reports:      reports,
+		MatchID:              matchID,
+		TeamReports:          teamReports,
+		EnemyReports:         enemyReports,
+		Reports:              reports,
+		ScoreboardActivities: scoreboardActivities,
+		Players:              players,
 	}, nil
 }
 
