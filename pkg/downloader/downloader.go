@@ -22,37 +22,47 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// ProgressCallback is a function type for reporting download progress (0-100)
+type ProgressStage string
+
+const (
+	StageDownloading  ProgressStage = "downloading"
+	StageDecompressing ProgressStage = "decompressing"
+	StageComplete     ProgressStage = "complete"
+)
+
+type ProgressInfo struct {
+	Stage     ProgressStage `json:"stage"`
+	Progress  float64       `json:"progress"`
+}
+
 type ProgressCallback func(matchID int64, progress float64)
 
-// Global map to store progress updates
 var (
-	downloadProgress = make(map[int64]float64)
+	downloadProgress = make(map[int64]*ProgressInfo)
 	progressMu       sync.RWMutex
 )
 
-// GetProgress returns the current download progress for a match
-func GetProgress(matchID int64) float64 {
+func GetProgress(matchID int64) *ProgressInfo {
 	progressMu.RLock()
 	defer progressMu.RUnlock()
 	return downloadProgress[matchID]
 }
 
-// SetProgress updates the progress for a match
-func SetProgress(matchID int64, progress float64) {
+func SetProgress(matchID int64, stage ProgressStage, progress float64) {
 	progressMu.Lock()
 	defer progressMu.Unlock()
-	downloadProgress[matchID] = progress
+	downloadProgress[matchID] = &ProgressInfo{
+		Stage:    stage,
+		Progress: progress,
+	}
 }
 
-// ClearProgress removes progress for a match (e.g. when done)
 func ClearProgress(matchID int64) {
 	progressMu.Lock()
 	defer progressMu.Unlock()
 	delete(downloadProgress, matchID)
 }
 
-// ProgressWriter counts bytes written and reports progress
 type ProgressWriter struct {
 	Total      int64
 	Written    int64
@@ -64,13 +74,33 @@ func (pw *ProgressWriter) Write(p []byte) (int, error) {
 	n := len(p)
 	pw.Written += int64(n)
 
-	// Update progress at most every 100ms to avoid lock contention
 	if time.Since(pw.LastUpdate) > 100*time.Millisecond {
 		if pw.Total > 0 {
-			percentage := float64(pw.Written) / float64(pw.Total) * 100
-			SetProgress(pw.MatchID, percentage)
+			percentage := float64(pw.Written) / float64(pw.Total) * 50
+			SetProgress(pw.MatchID, StageDownloading, percentage)
 		}
 		pw.LastUpdate = time.Now()
+	}
+	return n, nil
+}
+
+type DecompressionProgressWriter struct {
+	Written    int64
+	MatchID    int64
+	LastUpdate time.Time
+}
+
+func (dpw *DecompressionProgressWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	dpw.Written += int64(n)
+
+	if time.Since(dpw.LastUpdate) > 200*time.Millisecond {
+		progress := 50 + (float64(dpw.Written) / 50000000 * 50)
+		if progress > 99 {
+			progress = 99
+		}
+		SetProgress(dpw.MatchID, StageDecompressing, progress)
+		dpw.LastUpdate = time.Now()
 	}
 	return n, nil
 }
@@ -705,11 +735,9 @@ func downloadAndExtractReplay(replayURLs []string, matchID int64, replayDir stri
 				}
 
 				if getResp.StatusCode == http.StatusOK {
-					// Success! Save and return
 					defer getResp.Body.Close()
 
-					// Initialize progress
-					SetProgress(matchID, 0)
+					SetProgress(matchID, StageDownloading, 0)
 					defer ClearProgress(matchID)
 
 					bz2File, err := os.Create(bz2FilePath)
@@ -718,7 +746,6 @@ func downloadAndExtractReplay(replayURLs []string, matchID int64, replayDir stri
 					}
 					defer bz2File.Close()
 
-					// Wrap response body with progress writer
 					contentLength := getResp.ContentLength
 					progressWriter := &ProgressWriter{
 						Total:   contentLength,
@@ -731,8 +758,7 @@ func downloadAndExtractReplay(replayURLs []string, matchID int64, replayDir stri
 						return fmt.Errorf("failed to save .bz2 file: %w", err)
 					}
 
-					// Ensure 100% at end
-					SetProgress(matchID, 100)
+					SetProgress(matchID, StageDownloading, 50)
 					return nil
 				}
 
@@ -781,6 +807,8 @@ func downloadAndExtractReplay(replayURLs []string, matchID int64, replayDir stri
 	demFilePath := filepath.Join(replayDir, fmt.Sprintf("%d.dem", matchID))
 
 	err = func() error {
+		SetProgress(matchID, StageDecompressing, 50)
+
 		bz2FileReader, err := os.Open(bz2FilePath)
 		if err != nil {
 			return fmt.Errorf("failed to open .bz2 file: %w", err)
@@ -795,9 +823,17 @@ func downloadAndExtractReplay(replayURLs []string, matchID int64, replayDir stri
 		}
 		defer demFile.Close()
 
-		if _, err := io.Copy(demFile, bzip2Reader); err != nil {
+		decompProgressWriter := &DecompressionProgressWriter{
+			MatchID: matchID,
+		}
+
+		reader := io.TeeReader(bzip2Reader, decompProgressWriter)
+
+		if _, err := io.Copy(demFile, reader); err != nil {
 			return fmt.Errorf("failed to write decompressed data: %w", err)
 		}
+
+		SetProgress(matchID, StageComplete, 100)
 		return nil
 	}()
 

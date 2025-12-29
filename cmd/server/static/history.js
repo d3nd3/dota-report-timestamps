@@ -364,27 +364,57 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             
             const status = document.getElementById(`status-${matchId}`);
+            const progressContainer = document.getElementById(`progress-container-${matchId}`);
+            const progressBar = document.getElementById(`progress-${matchId}`);
+            
             if (status) {
-                status.textContent = 'Downloading...';
+                status.textContent = 'Starting...';
                 status.className = 'status-pill status-downloading';
                 status.style.visibility = 'visible';
             }
-
-            const progressContainer = document.getElementById(`progress-container-${matchId}`);
-            const progressBar = document.getElementById(`progress-${matchId}`);
             
             if (progressContainer && btn) {
                 progressContainer.classList.remove('hidden');
                 btn.style.display = 'none';
             }
+            
+            if (progressBar) {
+                progressBar.style.width = '0%';
+            }
 
             const eventSource = new EventSource(`/api/progress?matchId=${matchId}`);
             eventSource.onmessage = (event) => {
-                const percent = parseFloat(event.data);
-                if (progressBar) {
-                    const currentWidth = parseFloat(progressBar.style.width) || 0;
-                    if (percent >= currentWidth) {
-                        progressBar.style.width = `${percent}%`;
+                try {
+                    const data = JSON.parse(event.data);
+                    const percent = data.progress || 0;
+                    const stage = data.stage || '';
+                    
+                    if (progressBar) {
+                        const currentWidth = parseFloat(progressBar.style.width) || 0;
+                        if (percent >= currentWidth) {
+                            progressBar.style.width = `${percent}%`;
+                        }
+                    }
+                    
+                    if (status) {
+                        if (stage === 'downloading') {
+                            status.textContent = 'Downloading...';
+                            status.className = 'status-pill status-downloading';
+                        } else if (stage === 'decompressing') {
+                            status.textContent = 'Decompressing...';
+                            status.className = 'status-pill status-downloading';
+                        } else if (stage === 'complete') {
+                            status.textContent = 'Complete';
+                            status.className = 'status-pill status-success';
+                        }
+                    }
+                } catch (e) {
+                    const percent = parseFloat(event.data);
+                    if (!isNaN(percent) && progressBar) {
+                        const currentWidth = parseFloat(progressBar.style.width) || 0;
+                        if (percent >= currentWidth) {
+                            progressBar.style.width = `${percent}%`;
+                        }
                     }
                 }
             };

@@ -51,11 +51,12 @@ type ValidateReportCardResults struct {
 }
 
 type MatchParseResult struct {
-	MatchID      int64  `json:"matchId"`
-	Reports      int    `json:"reports"`
-	TeamReports  int    `json:"teamReports"`
-	EnemyReports int    `json:"enemyReports"`
-	Error        string `json:"error,omitempty"`
+	MatchID      int64                  `json:"matchId"`
+	Reports      int                     `json:"reports"`
+	TeamReports  int                     `json:"teamReports"`
+	EnemyReports int                     `json:"enemyReports"`
+	Error        string                  `json:"error,omitempty"`
+	FullResult   *parser.ParseResult     `json:"fullResult,omitempty"`
 }
 
 // convertSteamID ensures we have the correct format.
@@ -659,6 +660,7 @@ func handleValidateReportCard(w http.ResponseWriter, r *http.Request) {
 			Reports:      len(result.Reports),
 			TeamReports: result.TeamReports,
 			EnemyReports: result.EnemyReports,
+			FullResult:   &result,
 		})
 
 		totalReports += len(result.Reports)
@@ -1052,6 +1054,7 @@ func handleValidateReportCardCurrent(w http.ResponseWriter, r *http.Request) {
 			Reports:      len(result.Reports),
 			TeamReports: result.TeamReports,
 			EnemyReports: result.EnemyReports,
+			FullResult:   &result,
 		})
 
 		totalReports += len(result.Reports)
@@ -2571,17 +2574,24 @@ func handleProgress(w http.ResponseWriter, r *http.Request) {
 		case <-timeout:
 			return
 		case <-ticker.C:
-			progress := downloader.GetProgress(matchID)
+			progressInfo := downloader.GetProgress(matchID)
+			if progressInfo == nil {
+				fmt.Fprintf(w, "data: {\"stage\":\"\",\"progress\":0}\n\n")
+				w.(http.Flusher).Flush()
+				continue
+			}
 
-			// Send event
-			fmt.Fprintf(w, "data: %.2f\n\n", progress)
+			jsonData, err := json.Marshal(progressInfo)
+			if err != nil {
+				fmt.Fprintf(w, "data: {\"stage\":\"\",\"progress\":0}\n\n")
+			} else {
+				fmt.Fprintf(w, "data: %s\n\n", string(jsonData))
+			}
 			w.(http.Flusher).Flush()
 
-			if progress >= 100 {
+			if progressInfo.Progress >= 100 {
 				return
 			}
-			// If progress is 0 but it might have finished or not started.
-			// We rely on the frontend to close the connection when the download API returns.
 		}
 	}
 }

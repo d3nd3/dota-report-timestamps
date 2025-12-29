@@ -154,6 +154,18 @@ const DOTA_HEROES = [
         return steamIDStr;
     }
 
+    function normalizeSteamIDForComparison(steamID) {
+        if (!steamID) return null;
+        return convertSteamIDTo64(steamID);
+    }
+
+    function steamIDsMatch(steamID1, steamID2) {
+        if (!steamID1 || !steamID2) return false;
+        const normalized1 = normalizeSteamIDForComparison(steamID1);
+        const normalized2 = normalizeSteamIDForComparison(steamID2);
+        return normalized1 && normalized2 && normalized1 === normalized2;
+    }
+
     function getSlotColor(slot) {
         if (slot === null || slot === undefined || slot < 0 || slot >= 10) {
             return 'var(--text-primary)';
@@ -640,6 +652,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const steamLoginBtn = document.getElementById('steam-login-btn');
     const steamDisconnectBtn = document.getElementById('steam-disconnect-btn');
     const steamStatusText = document.getElementById('steam-status');
+    const steamStatusBadge = document.getElementById('steam-status-badge');
+    const setupToggle = document.getElementById('setup-toggle');
+    const setupPanel = document.getElementById('setup-panel');
+    const workflowTabs = document.querySelectorAll('.workflow-tab');
 
     // Steam Logic
     let steamPollingInterval;
@@ -651,8 +667,24 @@ document.addEventListener('DOMContentLoaded', () => {
     
     function updateSteamUI(status, text, errorMessage) {
         const statusText = `Status: ${text}`;
-        if (steamStatusText.textContent !== statusText) {
-            steamStatusText.textContent = statusText;
+        if (steamStatusText) {
+            if (steamStatusText.textContent !== statusText) {
+                steamStatusText.textContent = statusText;
+            }
+        }
+        
+        if (steamStatusBadge) {
+            const statusLabel = steamStatusBadge.querySelector('.status-text');
+            if (statusLabel) {
+                statusLabel.textContent = `Steam: ${text}`;
+            }
+            if (status === 3 || status === 4) {
+                steamStatusBadge.classList.remove('disconnected');
+                steamStatusBadge.classList.add('connected');
+            } else {
+                steamStatusBadge.classList.remove('connected');
+                steamStatusBadge.classList.add('disconnected');
+            }
         }
         
         // Display error message if present
@@ -922,12 +954,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div style="margin-top: var(--spacing-md); display: flex; justify-content: center; gap: var(--spacing-md); flex-wrap: wrap;">
                     <button id="validate-report-card-btn" class="btn primary-btn" 
                             data-match-id="${data.match_id}" 
-                            data-account-id="${data.account_id}">
+                            data-account-id="${String(data.account_id)}">
                         Validate Report Card
                     </button>
                     <button id="validate-report-card-current-btn" class="btn secondary-btn" 
                             data-match-id="${data.match_id}" 
-                            data-account-id="${data.account_id}">
+                            data-account-id="${String(data.account_id)}">
                         Current
                     </button>
                 </div>
@@ -954,8 +986,9 @@ document.addEventListener('DOMContentLoaded', () => {
             validateBtn.setAttribute('data-listener-attached', 'true');
             validateBtn.addEventListener('click', () => {
                 const matchId = validateBtn.getAttribute('data-match-id');
-                const accountId = validateBtn.getAttribute('data-account-id');
-                validateReportCard(parseInt(matchId), parseInt(accountId), false);
+                const accountIdStr = validateBtn.getAttribute('data-account-id');
+                const accountId = accountIdStr ? BigInt(accountIdStr) : null;
+                validateReportCard(parseInt(matchId), accountId, false);
             });
         }
         
@@ -964,8 +997,9 @@ document.addEventListener('DOMContentLoaded', () => {
             validateCurrentBtn.setAttribute('data-listener-attached', 'true');
             validateCurrentBtn.addEventListener('click', () => {
                 const matchId = validateCurrentBtn.getAttribute('data-match-id');
-                const accountId = validateCurrentBtn.getAttribute('data-account-id');
-                validateReportCard(parseInt(matchId), parseInt(accountId), true);
+                const accountIdStr = validateCurrentBtn.getAttribute('data-account-id');
+                const accountId = accountIdStr ? BigInt(accountIdStr) : null;
+                validateReportCard(parseInt(matchId), accountId, true);
             });
         }
     }
@@ -973,8 +1007,10 @@ document.addEventListener('DOMContentLoaded', () => {
     let validateReportCardInProgress = false;
 
     let validateReportCardEventSource = null;
+    let validateReportCardAccountID = null;
 
     function validateReportCard(matchId, accountId, isCurrent) {
+        validateReportCardAccountID = accountId ? (typeof accountId === 'bigint' ? accountId : BigInt(String(accountId))) : null;
         const statusDiv = document.getElementById('validate-report-card-status');
         const btn = isCurrent ? document.getElementById('validate-report-card-current-btn') : document.getElementById('validate-report-card-btn');
         const otherBtn = isCurrent ? document.getElementById('validate-report-card-btn') : document.getElementById('validate-report-card-current-btn');
@@ -1072,12 +1108,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         };
         
+        const accountIDForRequest = accountId ? (typeof accountId === 'bigint' ? Number(accountId) : (typeof accountId === 'string' ? Number(accountId) : accountId)) : null;
         fetch(endpoint, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 matchId: matchId,
-                accountId: accountId
+                accountId: accountIDForRequest
             })
         })
             .then(res => {
@@ -1089,7 +1126,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 return res.json();
             })
             .then(data => {
-                if (data.results) {
+                if (data.results && data.results.matchResults) {
                     let html = `<div><strong>${data.results.totalReports} total reports found</strong></div>`;
                     html += `<div style="margin-top: 8px; font-size: 0.9em;">`;
                     html += `Downloaded: ${data.downloaded?.length || 0} | `;
@@ -1101,6 +1138,10 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                     statusDiv.innerHTML = html;
                     statusDiv.style.color = 'var(--success-color)';
+                    
+                    setTimeout(() => {
+                        processValidateReportCardResults(data.results, data.directory || '');
+                    }, 500);
                 }
             })
             .catch(err => {
@@ -1121,6 +1162,347 @@ document.addEventListener('DOMContentLoaded', () => {
                 btn.textContent = isCurrent ? 'Current' : 'Validate Report Card';
                 if (otherBtn) otherBtn.disabled = false;
             });
+    }
+
+    function processValidateReportCardResults(results, directory) {
+        if (!results || !results.matchResults) return;
+        
+        if (validateReportCardAccountID) {
+            const accountIDStr = typeof validateReportCardAccountID === 'bigint' ? validateReportCardAccountID.toString() : String(validateReportCardAccountID);
+            const accountIDNum = BigInt(accountIDStr);
+            const STEAMID64_IDENTIFIER = BigInt('76561197960265728');
+            const expectedSteamID64 = (accountIDNum + STEAMID64_IDENTIFIER).toString();
+            const convertedSteamID = convertSteamIDTo64(accountIDStr);
+            analysisSteamID = convertedSteamID;
+            console.log('[ValidateReportCard] Set analysisSteamID to:', analysisSteamID, 'from accountID:', accountIDStr);
+        }
+        
+        const matchData = [];
+        const confirmedPlayerReportCounts = new Map();
+        const unconfirmedPlayerReportCounts = new Map();
+        const confirmedTimelineData = [];
+        const unconfirmedTimelineData = [];
+        let totalTeamReports = 0;
+        let totalEnemyReports = 0;
+        let totalConfirmedTeamReports = 0;
+        let totalConfirmedEnemyReports = 0;
+        
+        results.matchResults.forEach(matchResult => {
+            if (matchResult.error || !matchResult.fullResult) return;
+            
+            const result = matchResult.fullResult;
+            const filePath = directory ? `${directory}/${matchResult.matchId}.dem` : `${matchResult.matchId}.dem`;
+            
+            const countedSlots = new Set();
+            let uniqueTeamReports = 0;
+            let uniqueEnemyReports = 0;
+            
+            if (result.Reports) {
+                result.Reports.forEach(report => {
+                    if (!countedSlots.has(report.Slot)) {
+                        countedSlots.add(report.Slot);
+                        if (report.Team === "FRIENDLY") {
+                            uniqueTeamReports++;
+                        } else {
+                            uniqueEnemyReports++;
+                        }
+                    }
+                });
+            }
+            
+            totalTeamReports += uniqueTeamReports;
+            totalEnemyReports += uniqueEnemyReports;
+            totalConfirmedTeamReports += uniqueTeamReports;
+            totalConfirmedEnemyReports += uniqueEnemyReports;
+            
+            matchData.push({
+                matchID: result.MatchID,
+                filePath: filePath,
+                teamReports: uniqueTeamReports,
+                enemyReports: uniqueEnemyReports,
+                confirmedTeamReports: uniqueTeamReports,
+                confirmedEnemyReports: uniqueEnemyReports,
+                unconfirmedTeamReports: 0,
+                unconfirmedEnemyReports: 0,
+                reports: result.Reports || [],
+                scoreboardActivities: result.scoreboardActivities || [],
+                players: result.Players || []
+            });
+            
+            if (result.Reports) {
+                result.Reports.forEach(report => {
+                    const playerKey = report.Name || `Slot ${report.Slot}`;
+                    const timeParts = report.Time.split(':');
+                    let totalMinutes = 0;
+                    if (timeParts.length === 2) {
+                        const minutes = parseInt(timeParts[0]) || 0;
+                        const seconds = parseInt(timeParts[1]) || 0;
+                        totalMinutes = minutes + seconds / 60;
+                    }
+                    
+                    const timelinePoint = {
+                        x: totalMinutes,
+                        y: report.Team === 'FRIENDLY' ? 1 : 2,
+                        matchID: result.MatchID
+                    };
+                    
+                    if (report.Confirmed) {
+                        confirmedPlayerReportCounts.set(playerKey, (confirmedPlayerReportCounts.get(playerKey) || 0) + 1);
+                        confirmedTimelineData.push(timelinePoint);
+                    } else {
+                        unconfirmedPlayerReportCounts.set(playerKey, (unconfirmedPlayerReportCounts.get(playerKey) || 0) + 1);
+                        unconfirmedTimelineData.push(timelinePoint);
+                    }
+                });
+            }
+        });
+        
+        if (matchData.length > 0) {
+            allMatchDataOriginal = JSON.parse(JSON.stringify(matchData));
+            allMatchData = matchData;
+            populateMatchSelector(matchData);
+            if (matchData.length > 1) {
+                matchSelectorContainer.classList.remove('hidden');
+            } else {
+                matchSelectorContainer.classList.add('hidden');
+            }
+            
+            populatePlayerSelector(matchData[0]).then(() => {
+                if (analysisSteamID) {
+                    const steamIDToMatch = String(analysisSteamID);
+                    console.log('[ValidateReportCard] Looking for player with SteamID:', steamIDToMatch);
+                    console.log('[ValidateReportCard] Available players:', playerSelectorOptions.map(opt => ({ 
+                        key: opt.key, 
+                        steamID: String(opt.steamID || 'null'), 
+                        name: opt.name, 
+                        slot: opt.slot 
+                    })));
+                    
+                    const matchingPlayer = playerSelectorOptions.find(opt => {
+                        if (!opt.steamID) return false;
+                        const match = steamIDsMatch(opt.steamID, steamIDToMatch);
+                        if (!match) {
+                            console.log(`[ValidateReportCard] SteamID mismatch: opt.steamID="${opt.steamID}" !== target="${steamIDToMatch}" for ${opt.name}`);
+                        }
+                        return match;
+                    });
+                    
+                    if (matchingPlayer) {
+                        console.log('[ValidateReportCard] Found matching player, selecting:', matchingPlayer.key, matchingPlayer.name);
+                        currentSelectedPlayer = matchingPlayer.key;
+                        selectPlayerOption(matchingPlayer.key);
+                    } else {
+                        console.log('[ValidateReportCard] No matching player found for SteamID:', steamIDToMatch);
+                        console.log('[ValidateReportCard] Player SteamIDs:', playerSelectorOptions.map(opt => ({ 
+                            name: opt.name, 
+                            steamID: String(opt.steamID || 'null'), 
+                            slot: opt.slot 
+                        })));
+                        
+                        const playerFromReports = playerSelectorOptions.find(opt => {
+                            if (opt.slot == null) return false;
+                            const match = matchData[0];
+                            if (!match || !match.players) return false;
+                            const player = match.players.find(p => p.Slot === opt.slot);
+                            if (!player || !player.SteamID) return false;
+                            return steamIDsMatch(player.SteamID, steamIDToMatch);
+                        });
+                        
+                        if (playerFromReports) {
+                            console.log('[ValidateReportCard] Found player from reports data, selecting:', playerFromReports.key, playerFromReports.name);
+                            currentSelectedPlayer = playerFromReports.key;
+                            selectPlayerOption(playerFromReports.key);
+                        } else {
+                            const targetSlotFromReports = matchData[0]?.players?.find(p => p.SteamID && steamIDsMatch(p.SteamID, steamIDToMatch))?.Slot;
+                            if (targetSlotFromReports != null && targetSlotFromReports >= 0 && targetSlotFromReports < 10) {
+                                const slotKey = `slot_${targetSlotFromReports}`;
+                                const slotPlayer = playerSelectorOptions.find(opt => opt.key === slotKey);
+                                if (slotPlayer) {
+                                    console.log('[ValidateReportCard] Found player by slot from reports, selecting:', slotPlayer.key, slotPlayer.name);
+                                    currentSelectedPlayer = slotPlayer.key;
+                                    selectPlayerOption(slotPlayer.key);
+                                } else {
+                                    console.log('[ValidateReportCard] Could not find player, but will filter by SteamID in reports');
+                                    currentSelectedPlayer = null;
+                                }
+                            } else {
+                                console.log('[ValidateReportCard] Could not find player, but will filter by SteamID in reports');
+                                currentSelectedPlayer = null;
+                            }
+                        }
+                    }
+                } else {
+                    console.log('[ValidateReportCard] No analysisSteamID set, showing all players');
+                    currentSelectedPlayer = null;
+                }
+                
+                if (totalTeamReports + totalEnemyReports > 0) {
+                    const totalUnconfirmedTeamReports = totalTeamReports - totalConfirmedTeamReports;
+                    const totalUnconfirmedEnemyReports = totalEnemyReports - totalConfirmedEnemyReports;
+                    
+                    allConfirmedPlayerReportCounts = confirmedPlayerReportCounts;
+                    allUnconfirmedPlayerReportCounts = unconfirmedPlayerReportCounts;
+                    allConfirmedTimelineData = confirmedTimelineData;
+                    allUnconfirmedTimelineData = unconfirmedTimelineData;
+                    allTotalTeamReports = totalTeamReports;
+                    allTotalEnemyReports = totalEnemyReports;
+                    allTotalConfirmedTeamReports = totalConfirmedTeamReports;
+                    allTotalConfirmedEnemyReports = totalConfirmedEnemyReports;
+                    allTotalUnconfirmedTeamReports = totalUnconfirmedTeamReports;
+                    allTotalUnconfirmedEnemyReports = totalUnconfirmedEnemyReports;
+                    
+                    resultsSection.classList.remove('hidden');
+                    if (typeof switchToTab === 'function') {
+                        switchToTab('results');
+                    }
+                    
+                    if (!currentSelectedPlayer && analysisSteamID) {
+                        const matchingPlayer = playerSelectorOptions.find(opt => opt.steamID && steamIDsMatch(opt.steamID, analysisSteamID));
+                        if (matchingPlayer) {
+                            console.log('[ValidateReportCard] Found matching player for analysisSteamID, selecting:', matchingPlayer.key);
+                            currentSelectedPlayer = matchingPlayer.key;
+                            selectPlayerOption(matchingPlayer.key);
+                        } else {
+                        const steamIDFilter = `steamid_${analysisSteamID}`;
+                        console.log('[ValidateReportCard] No player selected but analysisSteamID exists, using SteamID filter:', steamIDFilter);
+                        currentSelectedPlayer = steamIDFilter;
+                            let matchingOption = playerSelectorOptions.find(opt => opt.key === steamIDFilter);
+                        if (!matchingOption) {
+                                let slotFromMatch = null;
+                                if (matchData[0]?.players) {
+                                    const expectedSteamIDNum = BigInt(analysisSteamID);
+                                    let closestPlayer = null;
+                                    let minDiff = BigInt(1000);
+                                    matchData[0].players.forEach(p => {
+                                        if (p.SteamID) {
+                                            const playerSteamIDNum = BigInt(String(p.SteamID));
+                                            const diff = expectedSteamIDNum > playerSteamIDNum ? expectedSteamIDNum - playerSteamIDNum : playerSteamIDNum - expectedSteamIDNum;
+                                            if (diff < minDiff) {
+                                                minDiff = diff;
+                                                closestPlayer = p;
+                                            }
+                                        }
+                                    });
+                                    if (closestPlayer && closestPlayer.Slot != null && closestPlayer.Slot >= 0 && closestPlayer.Slot < 10 && minDiff <= BigInt(10)) {
+                                        slotFromMatch = closestPlayer.Slot;
+                                        const actualSteamID = String(closestPlayer.SteamID);
+                                        if (actualSteamID !== analysisSteamID) {
+                                            console.log('[ValidateReportCard] Correcting analysisSteamID from', analysisSteamID, 'to', actualSteamID, 'based on match.players (diff:', minDiff.toString(), ')');
+                                            analysisSteamID = actualSteamID;
+                                        }
+                                        console.log('[ValidateReportCard] Found slot', slotFromMatch, 'for Your Account from match.players');
+                                    }
+                                }
+                                if (slotFromMatch == null && matchData[0]?.reports) {
+                                    const reportWithSlot = matchData[0].reports.find(r => r.TargetSteamID && steamIDsMatch(r.TargetSteamID, analysisSteamID) && r.TargetSlot != null && r.TargetSlot >= 0 && r.TargetSlot < 10);
+                                    if (reportWithSlot) {
+                                        slotFromMatch = reportWithSlot.TargetSlot;
+                                        console.log('[ValidateReportCard] Found slot', slotFromMatch, 'for Your Account from reports');
+                                    } else {
+                                        const targetSteamIDNum = BigInt(analysisSteamID);
+                                        const reportsWithSlots = matchData[0].reports
+                                            .filter(r => r.TargetSteamID && r.TargetSlot != null && r.TargetSlot >= 0 && r.TargetSlot < 10)
+                                            .map(r => ({
+                                                report: r,
+                                                targetSteamID: BigInt(String(r.TargetSteamID)),
+                                                slot: r.TargetSlot,
+                                                diff: targetSteamIDNum > BigInt(String(r.TargetSteamID)) 
+                                                    ? targetSteamIDNum - BigInt(String(r.TargetSteamID))
+                                                    : BigInt(String(r.TargetSteamID)) - targetSteamIDNum
+                                            }))
+                                            .sort((a, b) => {
+                                                if (a.diff < b.diff) return -1;
+                                                if (a.diff > b.diff) return 1;
+                                                return 0;
+                                            });
+                                        if (reportsWithSlots.length > 0 && reportsWithSlots[0].diff <= BigInt(100)) {
+                                            slotFromMatch = reportsWithSlots[0].slot;
+                                            console.log('[ValidateReportCard] Found slot', slotFromMatch, 'for Your Account from closest matching report (diff:', reportsWithSlots[0].diff.toString(), ')');
+                                        }
+                                    }
+                                }
+                                matchingOption = {
+                                key: steamIDFilter,
+                                name: 'Your Account',
+                                hero: '',
+                                team: null,
+                                reportCount: 0,
+                                    slot: slotFromMatch,
+                                steamID: String(analysisSteamID)
+                                };
+                                playerSelectorOptions.push(matchingOption);
+                            } else if (matchingOption.slot == null && matchData[0]) {
+                                let slotFromMatch = null;
+                                if (matchData[0].players) {
+                                    const expectedSteamIDNum = BigInt(analysisSteamID);
+                                    let closestPlayer = null;
+                                    let minDiff = BigInt(1000);
+                                    matchData[0].players.forEach(p => {
+                                        if (p.SteamID) {
+                                            const playerSteamIDNum = BigInt(String(p.SteamID));
+                                            const diff = expectedSteamIDNum > playerSteamIDNum ? expectedSteamIDNum - playerSteamIDNum : playerSteamIDNum - expectedSteamIDNum;
+                                            if (diff < minDiff) {
+                                                minDiff = diff;
+                                                closestPlayer = p;
+                                            }
+                                        }
+                                    });
+                                    if (closestPlayer && closestPlayer.Slot != null && closestPlayer.Slot >= 0 && closestPlayer.Slot < 10 && minDiff <= BigInt(10)) {
+                                        slotFromMatch = closestPlayer.Slot;
+                                        const actualSteamID = String(closestPlayer.SteamID);
+                                        if (actualSteamID !== analysisSteamID) {
+                                            console.log('[ValidateReportCard] Correcting analysisSteamID from', analysisSteamID, 'to', actualSteamID, 'based on match.players (diff:', minDiff.toString(), ')');
+                                            analysisSteamID = actualSteamID;
+                                            matchingOption.steamID = actualSteamID;
+                                            matchingOption.key = `steamid_${actualSteamID}`;
+                                        }
+                                        console.log('[ValidateReportCard] Updating Your Account with slot', slotFromMatch, 'from match.players');
+                                    }
+                                }
+                                if (slotFromMatch == null && matchData[0].reports) {
+                                    const reportWithSlot = matchData[0].reports.find(r => r.TargetSteamID && steamIDsMatch(r.TargetSteamID, analysisSteamID) && r.TargetSlot != null && r.TargetSlot >= 0 && r.TargetSlot < 10);
+                                    if (reportWithSlot) {
+                                        slotFromMatch = reportWithSlot.TargetSlot;
+                                        console.log('[ValidateReportCard] Updating Your Account with slot', slotFromMatch, 'from reports');
+                                    }
+                                }
+                                if (slotFromMatch != null) {
+                                    matchingOption.slot = slotFromMatch;
+                                    renderPlayerSelector();
+                                }
+                        }
+                        selectPlayerOption(steamIDFilter);
+                        }
+                    }
+                    
+                    updateGraphsForPlayer(currentSelectedPlayer);
+                    graphsSection.classList.remove('hidden');
+                }
+            });
+        } else {
+            if (totalTeamReports + totalEnemyReports > 0) {
+                const totalUnconfirmedTeamReports = totalTeamReports - totalConfirmedTeamReports;
+                const totalUnconfirmedEnemyReports = totalEnemyReports - totalConfirmedEnemyReports;
+                
+                allConfirmedPlayerReportCounts = confirmedPlayerReportCounts;
+                allUnconfirmedPlayerReportCounts = unconfirmedPlayerReportCounts;
+                allConfirmedTimelineData = confirmedTimelineData;
+                allUnconfirmedTimelineData = unconfirmedTimelineData;
+                allTotalTeamReports = totalTeamReports;
+                allTotalEnemyReports = totalEnemyReports;
+                allTotalConfirmedTeamReports = totalConfirmedTeamReports;
+                allTotalConfirmedEnemyReports = totalConfirmedEnemyReports;
+                allTotalUnconfirmedTeamReports = totalUnconfirmedTeamReports;
+                allTotalUnconfirmedEnemyReports = totalUnconfirmedEnemyReports;
+                
+                resultsSection.classList.remove('hidden');
+                if (typeof switchToTab === 'function') {
+                    switchToTab('results');
+                }
+                updateGraphsForPlayer(currentSelectedPlayer);
+                graphsSection.classList.remove('hidden');
+            }
+        }
     }
 
     function pollSteamStatus() {
@@ -1659,6 +2041,38 @@ document.addEventListener('DOMContentLoaded', () => {
 
     refreshReplaysBtn.addEventListener('click', () => browseDirectory(currentPath));
 
+    if (setupToggle && setupPanel) {
+        setupToggle.addEventListener('click', () => {
+            setupPanel.classList.toggle('hidden');
+        });
+    }
+
+    if (workflowTabs.length > 0) {
+        workflowTabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const targetTab = tab.dataset.tab;
+                workflowTabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+                
+                document.querySelectorAll('.tab-content').forEach(content => {
+                    content.classList.remove('active');
+                });
+                
+                const targetContent = document.getElementById(`${targetTab}-tab`);
+                if (targetContent) {
+                    targetContent.classList.add('active');
+                }
+            });
+        });
+    }
+
+    function switchToTab(tabName) {
+        const tab = document.querySelector(`.workflow-tab[data-tab="${tabName}"]`);
+        if (tab) {
+            tab.click();
+        }
+    }
+
     selectAllBtn.addEventListener('click', () => {
         document.querySelectorAll('.replay-item input[type="checkbox"]').forEach(cb => {
             if (cb.value.endsWith('.dem')) cb.checked = true;
@@ -1828,6 +2242,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         resultsSection.classList.remove('hidden');
+        if (typeof switchToTab === 'function') {
+            switchToTab('results');
+        }
         
         if (matchData.length > 0) {
             allMatchDataOriginal = JSON.parse(JSON.stringify(matchData));
@@ -1903,7 +2320,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     console.log('Initial match - Looking for Steam ID:', steamIDToMatch);
                     console.log('Available players:', playerSelectorOptions.map(opt => ({ key: opt.key, steamID: String(opt.steamID), name: opt.name })));
                     const matchingPlayer = playerSelectorOptions.find(opt => 
-                        opt.steamID && String(opt.steamID) === steamIDToMatch
+                        opt.steamID && steamIDsMatch(opt.steamID, steamIDToMatch)
                     );
                     if (matchingPlayer) {
                         console.log('Found matching player, selecting:', matchingPlayer.key);
@@ -2473,6 +2890,34 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         let reports = matchData.reports;
+        let effectiveFilter = playerFilter;
+        
+        if (playerFilter && playerFilter.startsWith('steamid_') && matchData.players) {
+            const targetSteamID = String(playerFilter.replace('steamid_', '')).trim();
+            console.log(`[renderTimelineGraph] Attempting to find player by SteamID: "${targetSteamID}"`);
+            console.log(`[renderTimelineGraph] Available players:`, matchData.players.map(p => ({
+                Slot: p.Slot,
+                SteamID: p.SteamID ? String(p.SteamID).trim() : null,
+                Name: p.Name
+            })));
+            
+            const targetPlayer = matchData.players.find(p => {
+                if (!p.SteamID) return false;
+                const playerSteamID = String(p.SteamID).trim();
+                const match = playerSteamID === targetSteamID;
+                if (!match) {
+                    console.log(`[renderTimelineGraph] SteamID mismatch: player.SteamID="${playerSteamID}" !== target="${targetSteamID}" for ${p.Name}`);
+                }
+                return match;
+            });
+            
+            if (targetPlayer && targetPlayer.Slot != null && targetPlayer.Slot >= 0 && targetPlayer.Slot < 10) {
+                console.log(`[renderTimelineGraph] Found player by SteamID, converting to slot filter: slot_${targetPlayer.Slot}`);
+                effectiveFilter = `slot_${targetPlayer.Slot}`;
+            } else {
+                console.log(`[renderTimelineGraph] Player not found by SteamID, will try TargetSteamID filtering`);
+            }
+        }
         
         const slot4Reports = reports.filter(r => r.TargetSlot === 4);
         if (slot4Reports.length > 0) {
@@ -2485,37 +2930,45 @@ document.addEventListener('DOMContentLoaded', () => {
             console.log(`[FRONTEND] DEBUG: No reports found targeting slot 4. All TargetSlots:`, [...new Set(reports.map(r => r.TargetSlot))].sort());
         }
         
-        if (playerFilter) {
-            if (playerFilter.startsWith('slot_')) {
-                const targetSlot = parseInt(playerFilter.replace('slot_', ''));
-                console.log(`[FRONTEND] Filtering reports for TargetSlot: ${targetSlot} (type: ${typeof targetSlot})`);
-                console.log(`[FRONTEND] Total reports before filter: ${reports.length}`);
-                
-                const reportsForTargetSlot = reports.filter(r => r.TargetSlot === targetSlot);
-                console.log(`[FRONTEND] Reports with TargetSlot === ${targetSlot}:`, reportsForTargetSlot.length, 'reports found');
-                reportsForTargetSlot.forEach((r, idx) => {
-                    console.log(`[FRONTEND]   Report ${idx + 1}: Time="${r.Time}", Reporter="${r.Name}" (Slot ${r.Slot}), Target="${r.TargetName}" (Slot ${r.TargetSlot}), Team="${r.Team}"`);
-                });
-                
-                console.log(`[FRONTEND] Sample reports:`, reports.slice(0, 3).map(r => ({
-                    Time: r.Time,
-                    Reporter: r.Name,
-                    ReporterSlot: r.Slot,
+        if (effectiveFilter) {
+            if (effectiveFilter.startsWith('slot_')) {
+                const targetSlot = parseInt(effectiveFilter.replace('slot_', ''));
+                console.log(`[renderTimelineGraph] Filtering reports for TargetSlot: ${targetSlot}`);
+                const beforeCount = reports.length;
+                reports = reports.filter(r => r.TargetSlot === targetSlot);
+                console.log(`[renderTimelineGraph] Filtered from ${beforeCount} to ${reports.length} reports for TargetSlot: ${targetSlot}`);
+            } else if (effectiveFilter.startsWith('steamid_')) {
+                const targetSteamID = String(effectiveFilter.replace('steamid_', '')).trim();
+                console.log(`[renderTimelineGraph] Filtering by TargetSteamID: "${targetSteamID}"`);
+                const beforeCount = reports.length;
+                const sampleReports = reports.slice(0, 5).map(r => ({
+                    TargetSteamID: r.TargetSteamID,
+                    TargetSteamIDType: typeof r.TargetSteamID,
+                    TargetSteamIDString: r.TargetSteamID ? String(r.TargetSteamID).trim() : null,
                     TargetSlot: r.TargetSlot,
-                    TargetSlotType: typeof r.TargetSlot,
                     TargetName: r.TargetName
-                })));
+                }));
+                console.log(`[renderTimelineGraph] Sample report TargetSteamIDs:`, sampleReports);
                 reports = reports.filter(r => {
-                    const matches = r.TargetSlot === targetSlot;
-                    if (!matches && r.TargetSlot != null) {
-                        console.log(`[FRONTEND] Report filtered out - TargetSlot: ${r.TargetSlot} (${typeof r.TargetSlot}) !== ${targetSlot} (${typeof targetSlot})`);
+                    if (!r.TargetSteamID) return false;
+                    const reportTargetSteamID = String(r.TargetSteamID).trim();
+                    const matches = reportTargetSteamID === targetSteamID;
+                    if (!matches && reportTargetSteamID && targetSteamID) {
+                        console.log(`[renderTimelineGraph] Mismatch: report.TargetSteamID="${reportTargetSteamID}" (type: ${typeof r.TargetSteamID}) !== filter="${targetSteamID}"`);
                     }
                     return matches;
                 });
-                console.log(`[FRONTEND] Reports after filter: ${reports.length}`);
-            } else if (playerFilter.startsWith('steamid_')) {
-                const targetSteamID = playerFilter.replace('steamid_', '');
-                reports = reports.filter(r => String(r.TargetSteamID) === targetSteamID);
+                console.log(`[renderTimelineGraph] Filtered from ${beforeCount} to ${reports.length} reports for TargetSteamID: ${targetSteamID}`);
+                
+                if (reports.length === 0 && matchData.players) {
+                    console.log(`[renderTimelineGraph] No reports found by TargetSteamID, trying fallback to slot-based filtering`);
+                    const targetPlayer = matchData.players.find(p => p.SteamID && String(p.SteamID).trim() === targetSteamID);
+                    if (targetPlayer && targetPlayer.Slot != null && targetPlayer.Slot >= 0 && targetPlayer.Slot < 10) {
+                        console.log(`[renderTimelineGraph] Found player by SteamID for fallback, using slot ${targetPlayer.Slot}`);
+                        reports = matchData.reports.filter(r => r.TargetSlot === targetPlayer.Slot);
+                        console.log(`[renderTimelineGraph] Fallback slot filter found ${reports.length} reports`);
+                    }
+                }
             }
         }
 
@@ -2527,7 +2980,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const title = document.createElement('h3');
         title.className = 'graph-title';
-        title.textContent = 'Player Reported - Report Timestamps';
+        title.textContent = 'Incoming Reports - Report Timestamps';
         title.style.cssText = 'margin: 0 0 1rem 0; color: var(--text-primary); font-size: 1.25rem; font-weight: 600;';
         
         const canvas = document.createElement('canvas');
@@ -3049,7 +3502,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const title = document.createElement('h3');
         title.className = 'graph-title';
-        title.textContent = 'Player Reports - Reports Created';
+        title.textContent = 'Outgoing Reports - Reports Created';
         title.style.cssText = 'margin: 0 0 1rem 0; color: var(--text-primary); font-size: 1.25rem; font-weight: 600;';
         
         const canvas = document.createElement('canvas');
@@ -4076,6 +4529,21 @@ document.addEventListener('DOMContentLoaded', () => {
         currentSelectedPlayer = key || null;
         const option = playerSelectorOptions.find(o => o.key === key);
         
+        if (option && analysisSteamID) {
+            const optionSteamID = option.steamID ? String(option.steamID) : null;
+            if (optionSteamID && steamIDsMatch(optionSteamID, analysisSteamID)) {
+                const steamIDFilter = `steamid_${analysisSteamID}`;
+                const yourAccountOption = playerSelectorOptions.find(opt => opt.key === steamIDFilter);
+                if (yourAccountOption && yourAccountOption.name !== option.name) {
+                    yourAccountOption.name = option.name;
+                    yourAccountOption.hero = option.hero;
+                    yourAccountOption.slot = option.slot;
+                    yourAccountOption.team = option.team;
+                    renderPlayerSelector();
+                }
+            }
+        }
+        
         if (option) {
             console.log(`[FRONTEND] Found option for key "${key}":`, { slot: option.slot, name: option.name, reportCount: option.reportCount });
             const iconUrl = option.hero ? getHeroIconUrl(option.hero) : null;
@@ -4133,6 +4601,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 populatePlayerSelector(allMatchData[matchIndex]).then(() => {
                     if (currentSelectedPlayer) {
                         selectPlayerOption(currentSelectedPlayer);
+                    } else if (analysisSteamID) {
+                        const steamIDFilter = `steamid_${analysisSteamID}`;
+                        const matchingOption = playerSelectorOptions.find(opt => opt.key === steamIDFilter);
+                        if (!matchingOption) {
+                            playerSelectorOptions.push({
+                                key: steamIDFilter,
+                                name: 'Your Account',
+                                hero: '',
+                                team: null,
+                                reportCount: 0,
+                                slot: null,
+                                steamID: String(analysisSteamID)
+                            });
+                        }
+                        currentSelectedPlayer = steamIDFilter;
+                        selectPlayerOption(steamIDFilter);
                     } else {
                         renderCurrentGraph(allMatchData[matchIndex], currentSelectedPlayer);
                     }
@@ -4148,42 +4632,137 @@ document.addEventListener('DOMContentLoaded', () => {
         if (index >= 0 && index < allMatchData.length) {
             populatePlayerSelector(allMatchData[index]).then(() => {
                 let steamIDToMatch = null;
+                let playerToSelect = null;
                 
                 if (analysisSteamID) {
                     steamIDToMatch = String(analysisSteamID);
-                    console.log('Using analysisSteamID:', steamIDToMatch);
+                    console.log('[MatchSelector] Using analysisSteamID:', steamIDToMatch);
                 } else {
                     const selectedProfile = getSelectedProfile();
                     if (selectedProfile && selectedProfile.id) {
                         steamIDToMatch = convertSteamIDTo64(String(selectedProfile.id));
-                        console.log('Using profile SteamID (converted):', steamIDToMatch);
+                        console.log('[MatchSelector] Using profile SteamID (converted):', steamIDToMatch);
                     }
                 }
                 
                 if (steamIDToMatch) {
-                    console.log('Looking for Steam ID:', steamIDToMatch);
-                    console.log('Available players:', playerSelectorOptions.map(opt => ({ key: opt.key, steamID: String(opt.steamID), name: opt.name })));
-                    const matchingPlayer = playerSelectorOptions.find(opt => 
-                        opt.steamID && String(opt.steamID) === steamIDToMatch
-                    );
+                    console.log('[MatchSelector] Looking for Steam ID:', steamIDToMatch);
+                    console.log('[MatchSelector] Available players:', playerSelectorOptions.map(opt => ({ key: opt.key, steamID: String(opt.steamID), name: opt.name, slot: opt.slot })));
+                    
+                    const matchingPlayer = playerSelectorOptions.find(opt => {
+                        if (!opt.steamID) return false;
+                        return steamIDsMatch(opt.steamID, steamIDToMatch);
+                    });
+                    
                     if (matchingPlayer) {
-                        console.log('Found matching player, selecting:', matchingPlayer.key);
-                        selectPlayerOption(matchingPlayer.key);
+                        console.log('[MatchSelector] Found matching player, selecting:', matchingPlayer.key, matchingPlayer.name);
+                        playerToSelect = matchingPlayer.key;
                     } else {
-                        console.log('No matching player found for Steam ID:', steamIDToMatch);
-                        const slot0Player = playerSelectorOptions.find(opt => opt.slot === 0);
-                        if (slot0Player) {
-                            console.log('Falling back to slot 0:', slot0Player);
-                            selectPlayerOption(slot0Player.key);
+                        console.log('[MatchSelector] No matching player found for Steam ID:', steamIDToMatch);
+                        console.log('[MatchSelector] Player SteamIDs:', playerSelectorOptions.map(opt => ({ name: opt.name, steamID: String(opt.steamID || 'null'), slot: opt.slot })));
+                    }
+                }
+                
+                if (playerToSelect) {
+                    currentSelectedPlayer = playerToSelect;
+                    selectPlayerOption(playerToSelect);
+                    
+                    if (analysisSteamID) {
+                        const selectedOption = playerSelectorOptions.find(opt => opt.key === playerToSelect);
+                        if (selectedOption && selectedOption.steamID && steamIDsMatch(selectedOption.steamID, analysisSteamID)) {
+                            const steamIDFilter = `steamid_${analysisSteamID}`;
+                            let yourAccountOption = playerSelectorOptions.find(opt => opt.key === steamIDFilter);
+                            if (!yourAccountOption) {
+                                yourAccountOption = {
+                                    key: steamIDFilter,
+                                    name: selectedOption.name,
+                                    hero: selectedOption.hero,
+                                    team: selectedOption.team,
+                                    reportCount: selectedOption.reportCount,
+                                    slot: selectedOption.slot,
+                                    steamID: String(analysisSteamID)
+                                };
+                                playerSelectorOptions.push(yourAccountOption);
+                                renderPlayerSelector();
+                            } else if (yourAccountOption.name !== selectedOption.name) {
+                                yourAccountOption.name = selectedOption.name;
+                                yourAccountOption.hero = selectedOption.hero;
+                                yourAccountOption.slot = selectedOption.slot;
+                                yourAccountOption.team = selectedOption.team;
+                                renderPlayerSelector();
+                            }
+                        }
+                    }
+                } else if (currentSelectedPlayer) {
+                    const stillExists = playerSelectorOptions.find(opt => opt.key === currentSelectedPlayer);
+                    if (stillExists) {
+                        console.log('[MatchSelector] Keeping current selection:', currentSelectedPlayer);
+                        selectPlayerOption(currentSelectedPlayer);
+                    } else {
+                        if (analysisSteamID) {
+                            const steamIDFilter = `steamid_${analysisSteamID}`;
+                            const matchingPlayer = playerSelectorOptions.find(opt => opt.steamID && steamIDsMatch(opt.steamID, analysisSteamID));
+                            if (matchingPlayer) {
+                                console.log('[MatchSelector] Found matching player for analysisSteamID, selecting:', matchingPlayer.key);
+                                currentSelectedPlayer = matchingPlayer.key;
+                                selectPlayerOption(matchingPlayer.key);
+                            } else {
+                            console.log('[MatchSelector] Current selection not found, using SteamID filter:', steamIDFilter);
+                            currentSelectedPlayer = steamIDFilter;
+                            const matchingOption = playerSelectorOptions.find(opt => opt.key === steamIDFilter);
+                            if (!matchingOption) {
+                                playerSelectorOptions.push({
+                                    key: steamIDFilter,
+                                    name: 'Your Account',
+                                    hero: '',
+                                    team: null,
+                                    reportCount: 0,
+                                    slot: null,
+                                    steamID: String(analysisSteamID)
+                                });
+                                    renderPlayerSelector();
+                            }
+                            selectPlayerOption(steamIDFilter);
+                            }
                         } else {
+                            console.log('[MatchSelector] Current selection not found in new match, showing all players');
+                            currentSelectedPlayer = null;
                             renderCurrentGraph(allMatchData[index], null);
                             updateGraphsForPlayer(null);
                         }
                     }
                 } else {
-                    console.log('No Steam ID to match');
-                    renderTimelineGraph(allMatchData[index], null);
-                    updateGraphsForPlayer(null);
+                    if (analysisSteamID) {
+                        const matchingPlayer = playerSelectorOptions.find(opt => opt.steamID && steamIDsMatch(opt.steamID, analysisSteamID));
+                        if (matchingPlayer) {
+                            console.log('[MatchSelector] Found matching player for analysisSteamID, selecting:', matchingPlayer.key);
+                            currentSelectedPlayer = matchingPlayer.key;
+                            selectPlayerOption(matchingPlayer.key);
+                        } else {
+                        const steamIDFilter = `steamid_${analysisSteamID}`;
+                        console.log('[MatchSelector] No player to select but analysisSteamID exists, using SteamID filter:', steamIDFilter);
+                        currentSelectedPlayer = steamIDFilter;
+                        const matchingOption = playerSelectorOptions.find(opt => opt.key === steamIDFilter);
+                        if (!matchingOption) {
+                            playerSelectorOptions.push({
+                                key: steamIDFilter,
+                                name: 'Your Account',
+                                hero: '',
+                                team: null,
+                                reportCount: 0,
+                                slot: null,
+                                steamID: String(analysisSteamID)
+                            });
+                                renderPlayerSelector();
+                        }
+                        selectPlayerOption(steamIDFilter);
+                        }
+                    } else {
+                        console.log('[MatchSelector] No player to select, showing all players');
+                        currentSelectedPlayer = null;
+                        renderCurrentGraph(allMatchData[index], null);
+                        updateGraphsForPlayer(null);
+                    }
                 }
             });
         }
@@ -4197,12 +4776,163 @@ document.addEventListener('DOMContentLoaded', () => {
         
         const filteredMatchData = matchData.map(match => {
             let filteredReports = match.reports || [];
-            if (playerFilter.startsWith('slot_')) {
-                const targetSlot = parseInt(playerFilter.replace('slot_', ''));
+            let effectiveFilter = playerFilter;
+            
+            if (playerFilter.startsWith('steamid_') && match.players) {
+                const targetSteamID = String(playerFilter.replace('steamid_', '')).trim();
+                const targetSteamIDNum = BigInt(targetSteamID);
+                const STEAMID64_IDENTIFIER = BigInt('76561197960265728');
+                const targetAccountID = targetSteamIDNum - STEAMID64_IDENTIFIER;
+                const targetPlayer = match.players.find(p => p.SteamID && String(p.SteamID).trim() === targetSteamID);
+                let foundPlayer = targetPlayer;
+                if (!foundPlayer) {
+                    const normalizedTarget = normalizeSteamIDForComparison(targetSteamID);
+                    foundPlayer = match.players.find(p => p.SteamID && steamIDsMatch(p.SteamID, targetSteamID));
+                    if (!foundPlayer) {
+                        const targetNum = BigInt(targetSteamID);
+                        let closestPlayer = null;
+                        let minDiff = BigInt(1000);
+                        match.players.forEach(p => {
+                            if (p.SteamID) {
+                                const playerNum = BigInt(String(p.SteamID));
+                                const diff = targetNum > playerNum ? targetNum - playerNum : playerNum - targetNum;
+                                if (diff < minDiff) {
+                                    minDiff = diff;
+                                    closestPlayer = p;
+                                }
+                            }
+                        });
+                        if (closestPlayer && minDiff <= BigInt(10)) {
+                            foundPlayer = closestPlayer;
+                            const actualSteamID = String(closestPlayer.SteamID);
+                            if (actualSteamID !== targetSteamID) {
+                                console.log('[filterDataByPlayer] Correcting SteamID from', targetSteamID, 'to', actualSteamID, 'based on match.players (diff:', minDiff.toString(), ')');
+                                if (analysisSteamID === targetSteamID) {
+                                    analysisSteamID = actualSteamID;
+                                }
+                                const playerOption = playerSelectorOptions.find(opt => opt.key === playerFilter);
+                                if (playerOption) {
+                                    playerOption.steamID = actualSteamID;
+                                    const newKey = `steamid_${actualSteamID}`;
+                                    if (playerOption.key !== newKey) {
+                                        playerOption.key = newKey;
+                                        if (currentSelectedPlayer === playerFilter) {
+                                            currentSelectedPlayer = newKey;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                if (foundPlayer && foundPlayer.Slot != null && foundPlayer.Slot >= 0 && foundPlayer.Slot < 10) {
+                    console.log(`[filterDataByPlayer] Found player by SteamID ${targetSteamID}, using slot ${foundPlayer.Slot} for filtering`);
+                    const playerOption = playerSelectorOptions.find(opt => opt.key === playerFilter);
+                    if (playerOption && (!playerOption.slot || playerOption.slot !== foundPlayer.Slot)) {
+                        playerOption.slot = foundPlayer.Slot;
+                        renderPlayerSelector();
+                    }
+                    effectiveFilter = `slot_${foundPlayer.Slot}`;
+                } else {
+                    const playerOption = playerSelectorOptions.find(opt => opt.key === playerFilter);
+                    if (playerOption && playerOption.slot != null && playerOption.slot >= 0 && playerOption.slot < 10) {
+                        console.log(`[filterDataByPlayer] Using slot ${playerOption.slot} from playerSelectorOptions for filter ${playerFilter}`);
+                        effectiveFilter = `slot_${playerOption.slot}`;
+                    } else {
+                        let reportWithSlot = filteredReports.find(r => r.TargetSteamID && steamIDsMatch(r.TargetSteamID, targetSteamID) && r.TargetSlot != null && r.TargetSlot >= 0 && r.TargetSlot < 10);
+                        if (!reportWithSlot && match.players) {
+                            const normalizedTarget = normalizeSteamIDForComparison(targetSteamID);
+                            for (const player of match.players) {
+                                if (player.SteamID && player.Slot != null && player.Slot >= 0 && player.Slot < 10) {
+                                    const playerSteamID = normalizeSteamIDForComparison(String(player.SteamID));
+                                    if (playerSteamID && normalizedTarget && playerSteamID === normalizedTarget) {
+                                        if (playerOption) {
+                                            playerOption.slot = player.Slot;
+                                            renderPlayerSelector();
+                                        }
+                                        effectiveFilter = `slot_${player.Slot}`;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (!effectiveFilter.startsWith('slot_')) {
+                            if (reportWithSlot) {
+                                console.log(`[filterDataByPlayer] Found slot ${reportWithSlot.TargetSlot} from reports for SteamID ${targetSteamID}`);
+                                if (playerOption) {
+                                    playerOption.slot = reportWithSlot.TargetSlot;
+                                    renderPlayerSelector();
+                                }
+                                effectiveFilter = `slot_${reportWithSlot.TargetSlot}`;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if (effectiveFilter.startsWith('steamid_') && !effectiveFilter.startsWith('slot_')) {
+                const targetSteamID = String(effectiveFilter.replace('steamid_', '')).trim();
+                const normalizedTarget = normalizeSteamIDForComparison(targetSteamID);
+                const slotCounts = new Map();
+                let checkedReports = 0;
+                let matchedReports = 0;
+                const targetNum = BigInt(targetSteamID);
+                filteredReports.forEach(r => {
+                    if (r.TargetSteamID && r.TargetSlot != null && r.TargetSlot >= 0 && r.TargetSlot < 10) {
+                        checkedReports++;
+                        const reportSteamID = normalizeSteamIDForComparison(String(r.TargetSteamID));
+                        let matches = false;
+                        if (reportSteamID && normalizedTarget && reportSteamID === normalizedTarget) {
+                            matches = true;
+                        } else {
+                            try {
+                                const reportNum = BigInt(String(r.TargetSteamID));
+                                const diff = targetNum > reportNum ? targetNum - reportNum : reportNum - targetNum;
+                                if (diff <= BigInt(10)) {
+                                    matches = true;
+                                }
+                            } catch (e) {
+                            }
+                        }
+                        if (matches) {
+                            matchedReports++;
+                            slotCounts.set(r.TargetSlot, (slotCounts.get(r.TargetSlot) || 0) + 1);
+                        }
+                    }
+                });
+                if (slotCounts.size > 0) {
+                    let maxCount = 0;
+                    let targetSlot = null;
+                    slotCounts.forEach((count, slot) => {
+                        if (count > maxCount) {
+                            maxCount = count;
+                            targetSlot = slot;
+                        }
+                    });
+                    if (targetSlot != null) {
+                        const playerOption = playerSelectorOptions.find(opt => opt.key === playerFilter);
+                        if (playerOption && (!playerOption.slot || playerOption.slot !== targetSlot)) {
+                            playerOption.slot = targetSlot;
+                            renderPlayerSelector();
+                        }
+                        effectiveFilter = `slot_${targetSlot}`;
+                        console.log(`[filterDataByPlayer] Found slot ${targetSlot} from reports with matching normalized SteamID, switching to slot filter`);
+                    }
+                }
+            }
+            if (effectiveFilter.startsWith('slot_')) {
+                const targetSlot = parseInt(effectiveFilter.replace('slot_', ''));
                 filteredReports = filteredReports.filter(r => r.TargetSlot === targetSlot);
-            } else if (playerFilter.startsWith('steamid_')) {
-                const targetSteamID = playerFilter.replace('steamid_', '');
-                filteredReports = filteredReports.filter(r => String(r.TargetSteamID) === targetSteamID);
+            } else if (effectiveFilter.startsWith('steamid_')) {
+                const targetSteamID = String(effectiveFilter.replace('steamid_', '')).trim();
+                console.log(`[filterDataByPlayer] Filtering by TargetSteamID: "${targetSteamID}"`);
+                filteredReports = filteredReports.filter(r => {
+                    if (!r.TargetSteamID) return false;
+                    const reportTargetSteamID = String(r.TargetSteamID).trim();
+                    return steamIDsMatch(reportTargetSteamID, targetSteamID);
+                });
+                console.log(`[filterDataByPlayer] Filtered to ${filteredReports.length} reports for TargetSteamID: ${targetSteamID}`);
             }
             
             const countedSlots = new Set();
@@ -4322,7 +5052,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 filteredConfirmedTimeline, filteredUnconfirmedTimeline,
                 totals.totalTeamReports, totals.totalEnemyReports,
                 totals.totalConfirmedTeamReports, totals.totalConfirmedEnemyReports,
-                totals.totalUnconfirmedTeamReports, totals.totalUnconfirmedEnemyReports);
+                totals.totalUnconfirmedTeamReports, totals.totalUnconfirmedEnemyReports, playerFilter);
         } else {
             const filteredMatchData = filterDataByPlayer(allMatchData, playerFilter);
             const filteredConfirmedCounts = filterReportCountsByPlayer(allConfirmedPlayerReportCounts, allMatchData, playerFilter);
@@ -4335,11 +5065,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 filteredConfirmedTimeline, filteredUnconfirmedTimeline,
                 totals.totalTeamReports, totals.totalEnemyReports,
                 totals.totalConfirmedTeamReports, totals.totalConfirmedEnemyReports,
-                totals.totalUnconfirmedTeamReports, totals.totalUnconfirmedEnemyReports);
+                totals.totalUnconfirmedTeamReports, totals.totalUnconfirmedEnemyReports, playerFilter);
         }
         
-        if (allMatchDataOriginal.length > 1 && analysisSteamID) {
-            updatePlayerReportsPerMatchGraph();
+        if (allMatchDataOriginal.length > 1 && (currentSelectedPlayer || analysisSteamID)) {
+            updatePlayerReportsPerMatchGraph(currentSelectedPlayer);
         } else {
             const playerReportsSection = document.getElementById('playerReportsPerMatchSection');
             if (playerReportsSection) {
@@ -4348,37 +5078,56 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
-    function updatePlayerReportsPerMatchGraph() {
+    function updatePlayerReportsPerMatchGraph(playerFilter) {
         const playerReportsSection = document.getElementById('playerReportsPerMatchSection');
         if (!playerReportsSection) return;
         
         let targetSteamID = null;
+        let steamIDFilter = null;
         
-        if (analysisSteamID) {
-            targetSteamID = String(analysisSteamID);
-        } else {
-            const selectedProfile = getSelectedProfile();
-            if (selectedProfile && selectedProfile.id) {
-                targetSteamID = convertSteamIDTo64(String(selectedProfile.id));
+        if (playerFilter && playerFilter.startsWith('steamid_')) {
+            targetSteamID = String(playerFilter.replace('steamid_', '')).trim();
+            steamIDFilter = playerFilter;
+        } else if (playerFilter && playerFilter.startsWith('slot_')) {
+            const playerOption = playerSelectorOptions.find(opt => opt.key === playerFilter);
+            if (playerOption && playerOption.steamID) {
+                targetSteamID = String(playerOption.steamID);
+                steamIDFilter = `steamid_${targetSteamID}`;
             }
         }
         
-        if (!targetSteamID || targetSteamID === '0' || targetSteamID === 'null' || targetSteamID === 'undefined') {
+        if (!targetSteamID && analysisSteamID) {
+            targetSteamID = String(analysisSteamID);
+            steamIDFilter = `steamid_${targetSteamID}`;
+        }
+        
+        if (!targetSteamID) {
+            const selectedProfile = getSelectedProfile();
+            if (selectedProfile && selectedProfile.id) {
+                targetSteamID = convertSteamIDTo64(String(selectedProfile.id));
+                steamIDFilter = `steamid_${targetSteamID}`;
+            }
+        }
+        
+        if (!targetSteamID || !steamIDFilter || targetSteamID === '0' || targetSteamID === 'null' || targetSteamID === 'undefined') {
             playerReportsSection.style.display = 'none';
             return;
         }
         
-        console.log('Player Reports Per Match - Using Steam ID:', targetSteamID);
+        console.log('Player Reports Per Match - Using Steam ID:', targetSteamID, 'Filter:', steamIDFilter);
+        
+        const filteredMatchData = filterDataByPlayer(allMatchDataOriginal, steamIDFilter);
+        
+        if (filteredMatchData.length === 0) {
+            playerReportsSection.style.display = 'none';
+            return;
+        }
         
         playerReportsSection.style.display = 'block';
         
-        const reportsPerMatch = allMatchDataOriginal.map(match => {
-            const reports = match.reports.filter(r => {
-                const reportSteamID = r.TargetSteamID ? String(r.TargetSteamID) : null;
-                return reportSteamID && reportSteamID === targetSteamID;
-            });
+        const reportsPerMatch = filteredMatchData.map(match => {
             const uniqueReporters = new Set();
-            reports.forEach(report => {
+            (match.reports || []).forEach(report => {
                 if (report.Slot != null) {
                     uniqueReporters.add(report.Slot);
                 }
@@ -4386,7 +5135,7 @@ document.addEventListener('DOMContentLoaded', () => {
             return uniqueReporters.size;
         });
         
-        const matchLabels = allMatchDataOriginal.map(m => `Match ${m.matchID}`);
+        const matchLabels = filteredMatchData.map(m => `Match ${m.matchID}`);
         
         matchLabels.reverse();
         reportsPerMatch.reverse();
@@ -4447,7 +5196,7 @@ document.addEventListener('DOMContentLoaded', () => {
         confirmedTimelineData, unconfirmedTimelineData,
         totalTeamReports, totalEnemyReports, 
         totalConfirmedTeamReports, totalConfirmedEnemyReports,
-        totalUnconfirmedTeamReports, totalUnconfirmedEnemyReports) {
+        totalUnconfirmedTeamReports, totalUnconfirmedEnemyReports, playerFilter) {
         chartInstances.forEach(chart => chart.destroy());
         chartInstances = [];
 
@@ -4466,24 +5215,19 @@ document.addEventListener('DOMContentLoaded', () => {
             reportSummary.style.display = 'none';
         }
 
-        // Calculate and display totals for all matches by summing unique reports received by the target Steam ID
+        // Calculate and display totals for all matches by summing unique reports received by the target player
         let allMatchesFriendly = 0;
         let allMatchesEnemy = 0;
         
-        if (allMatchDataOriginal && allMatchDataOriginal.length > 0 && analysisSteamID) {
-            allMatchDataOriginal.forEach(match => {
-                // Filter reports to only count those targeting the analysis Steam ID
-                const targetReports = (match.reports || []).filter(r => {
-                    const targetSteamID = r.TargetSteamID ? String(r.TargetSteamID) : null;
-                    return targetSteamID === analysisSteamID;
-                });
-                
+        if (allMatchDataOriginal && allMatchDataOriginal.length > 0 && (playerFilter || analysisSteamID)) {
+            const filteredAllMatchData = filterDataByPlayer(allMatchDataOriginal, playerFilter);
+            filteredAllMatchData.forEach(match => {
                 // Count unique reports by Slot (reporter slot) for the target player
                 const countedSlots = new Set();
                 let friendly = 0;
                 let enemy = 0;
                 
-                targetReports.forEach(report => {
+                (match.reports || []).forEach(report => {
                     if (!countedSlots.has(report.Slot)) {
                         countedSlots.add(report.Slot);
                         if (report.Team === "FRIENDLY") {

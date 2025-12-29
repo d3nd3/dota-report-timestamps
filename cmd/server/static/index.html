@@ -13,8 +13,17 @@
     <div class="app-container">
         <header class="main-header">
             <div class="header-content">
-                <h1>Dota 2 Report Parser</h1>
-                <p>Detect scoreboard usage and report button clicks in replays</p>
+                <div class="header-title">
+                    <h1>Dota 2 Report Parser</h1>
+                    <p>Detect scoreboard usage and report button clicks in replays</p>
+                </div>
+                <div class="header-actions">
+                    <div id="steam-status-badge" class="status-badge disconnected">
+                        <span class="status-dot"></span>
+                        <span class="status-text">Steam: Disconnected</span>
+                    </div>
+                    <button id="setup-toggle" class="btn icon-btn" title="Settings">⚙️</button>
+                </div>
             </div>
         </header>
 
@@ -26,148 +35,163 @@
             </div>
         </section>
 
+        <div id="setup-panel" class="setup-panel hidden">
+            <div class="setup-content">
+                <div class="setup-section">
+                    <h3>Configuration</h3>
+                    <div class="input-group">
+                        <label for="replay-dir">Replay Directory</label>
+                        <input type="text" id="replay-dir" placeholder="/path/to/dota/replays/">
+                        <small>Set this to your Dota 2 replays folder. If you select a profile, replays will be looked for in: <code>{base}/ProfileName/</code></small>
+                    </div>
+                    <div class="input-group">
+                        <label for="profile-select">Steam Profile</label>
+                        <select id="profile-select" class="full-width">
+                            <option value="">Select a profile...</option>
+                        </select>
+                    </div>
+                    <div class="input-group">
+                        <label>Add New Profile</label>
+                        <div class="row-group">
+                            <input type="text" id="new-profile-name" placeholder="Name (e.g. Main)">
+                            <input type="number" id="new-profile-id" placeholder="Steam ID">
+                            <button id="add-profile-btn" class="btn success-btn">Add</button>
+                        </div>
+                    </div>
+                    <div class="row-group" style="justify-content: flex-end;">
+                        <button id="delete-profile-btn" class="btn danger-btn small-btn" style="visibility: hidden;">Delete Selected</button>
+                    </div>
+                    <button id="save-config" class="btn secondary-btn" style="margin-top: 10px;">Save Settings</button>
+                </div>
+
+                <div class="setup-section">
+                    <h3>Steam Connection</h3>
+                    <p class="status-text" style="color: var(--text-secondary); font-size: 0.9em; margin-bottom: 10px;">Login to download recent matches from yourself or friends</p>
+                    <div class="input-group">
+                        <input type="text" id="steam-user" placeholder="Steam Username">
+                    </div>
+                    <div class="input-group">
+                        <input type="password" id="steam-pass" placeholder="Steam Password">
+                    </div>
+                    <div class="input-group hidden" id="steam-guard-group">
+                        <input type="text" id="steam-code" placeholder="Steam Guard Code">
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <button id="steam-login-btn" class="btn primary-btn">Connect to Steam</button>
+                        <button id="steam-disconnect-btn" class="btn danger-btn" style="display: none;">Disconnect</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <main class="main-content">
-            <aside class="sidebar">
-                <section id="config-section" class="card">
-                    <div class="card-header">
-                        <h2>Configuration</h2>
-                    </div>
-                    <div class="card-body">
-                        <div class="input-group">
-                            <label for="replay-dir">Replay Directory (Base Path)</label>
-                            <input type="text" id="replay-dir" placeholder="/path/to/dota/replays/">
-                            <small style="color: #666; display: block; margin-top: 5px;">
-                                Set this to your Dota 2 replays folder. If you select a profile, replays will be looked for in: <code>{base}/ProfileName/</code>
-                            </small>
-                        </div>
-                        <div class="input-group">
-                            <label for="profile-select">Steam Profiles</label>
-                            <div class="row-group">
-                                <select id="profile-select" class="full-width">
-                                    <option value="">Select a profile...</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div class="input-group">
-                            <label>Add New Profile</label>
-                            <div class="row-group">
-                                <input type="text" id="new-profile-name" placeholder="Name (e.g. Main)">
-                                <input type="number" id="new-profile-id" placeholder="Steam ID">
-                                <button id="add-profile-btn" class="btn success-btn">Add</button>
-                            </div>
-                        </div>
-                        <div class="row-group" style="justify-content: flex-end;">
-                            <button id="delete-profile-btn" class="btn danger-btn small-btn" style="visibility: hidden;">Delete Selected</button>
-                        </div>
-                        <div class="input-group" style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #e0e0e0;">
-                            <label>Steam GC Login</label>
-                            <p class="status-text" style="color: #666; font-size: 0.9em; margin-bottom: 10px;">Recommended: Login to Steam through the GUI if you want to download recent matches from yourself or friends</p>
-                            <p class="status-text" id="steam-status" style="margin-bottom: 10px;">Status: Disconnected</p>
-                            <div class="input-group" style="margin-bottom: 10px;">
-                                <input type="text" id="steam-user" placeholder="Steam Username">
-                            </div>
-                            <div class="input-group" style="margin-bottom: 10px;">
-                                <input type="password" id="steam-pass" placeholder="Steam Password">
-                            </div>
-                            <div class="input-group hidden" id="steam-guard-group" style="margin-bottom: 10px;">
-                                <input type="text" id="steam-code" placeholder="Steam Guard Code">
-                            </div>
-                            <div style="display: flex; gap: 10px;">
-                                <button id="steam-login-btn" class="btn primary-btn">Connect to Steam</button>
-                                <button id="steam-disconnect-btn" class="btn" style="display: none; background-color: #f44336; color: white;">Disconnect</button>
-                            </div>
-                        </div>
-                        <button id="save-config" class="btn secondary-btn" style="margin-top: 20px;">Save Settings</button>
-                    </div>
-                </section>
+            <div class="workflow-tabs">
+                <button class="workflow-tab active" data-tab="browse">
+                    <span class="tab-icon">📁</span>
+                    <span class="tab-label">Browse & Select</span>
+                </button>
+                <button class="workflow-tab" data-tab="analyze">
+                    <span class="tab-icon">🔍</span>
+                    <span class="tab-label">Analyze</span>
+                </button>
+                <button class="workflow-tab" data-tab="results">
+                    <span class="tab-icon">📊</span>
+                    <span class="tab-label">Results</span>
+                </button>
+            </div>
 
-                <section id="history-section" class="card">
-                    <div class="card-header">
-                        <h2>Match History</h2>
-                    </div>
-                    <div class="card-body">
-                        <div class="input-group">
-                            <label for="history-steam-id">Steam ID</label>
-                            <input type="number" id="history-steam-id" placeholder="e.g. 76561198...">
-                        </div>
-                        <div class="input-group">
-                            <label for="history-limit">Limit</label>
-                            <div class="row-group">
-                                <input type="number" id="history-limit" value="10" min="1" max="100">
-                                <button id="fetch-history" class="btn secondary-btn">Fetch</button>
+            <div class="tab-content active" id="browse-tab">
+                <div class="browse-grid">
+                    <section id="selection-section" class="card main-card">
+                        <div class="card-header">
+                            <h2>Local Replays</h2>
+                            <div class="header-controls">
+                                <div id="current-path" class="current-path"></div>
+                                <button id="browse-back" class="btn text-btn" style="display: none;">← Back</button>
+                                <button id="refresh-replays" class="btn icon-btn" title="Refresh">↻</button>
                             </div>
                         </div>
-                        <div class="input-group">
-                            <label>
-                                <input type="checkbox" id="history-turbo-only">
-                                Turbo games only
-                            </label>
-                        </div>
-                        <p class="status-text" style="color: #666; font-size: 0.9em; margin-top: 10px;">
-                            Steam connection required for match history
-                        </p>
-                        <p id="download-status" class="download-status hidden"></p>
-                        <div id="history-results" class="history-list custom-scrollbar"></div>
-                    </div>
-                </section>
-
-                <section id="fatal-search-section" class="card">
-                    <div class="card-header">
-                        <h2>Fatal Game Search</h2>
-                    </div>
-                    <div class="card-body">
-                        <div class="input-group">
-                            <label for="fatal-steam-id">Steam ID</label>
-                            <input type="number" id="fatal-steam-id" placeholder="Auto-filled from profile">
-                        </div>
-                        <div class="input-group">
-                            <label for="fatal-max-depth">Max Depth</label>
-                            <input type="number" id="fatal-max-depth" value="1" min="1" max="10">
-                            <small style="color: #666; display: block; margin-top: 5px;">Number of LowPriority sessions to search</small>
-                        </div>
-                        <div class="input-group">
-                            <label for="fatal-games-per">Games Per Fatal</label>
-                            <input type="number" id="fatal-games-per" value="2" min="1" max="15">
-                            <small style="color: #666; display: block; margin-top: 5px;">Number of games to download at each fatal game (includes fatal match + games before it)</small>
-                        </div>
-                        <button id="find-fatal-games" class="btn secondary-btn">Find Fatal Games</button>
-                        <p class="status-text" style="color: #666; font-size: 0.9em; margin-top: 10px;">
-                            Steam connection required
-                        </p>
-                        <div id="fatal-results" class="history-list custom-scrollbar" style="margin-top: 15px; max-height: 300px;"></div>
-                    </div>
-                </section>
-            </aside>
-
-            <div class="content-area">
-                <section id="selection-section" class="card">
-                    <div class="card-header">
-                        <h2>Local Replays</h2>
-                        <div class="header-controls">
-                            <div id="current-path" style="font-size: 0.85em; color: #666; margin-right: 10px; font-family: monospace;"></div>
-                            <button id="browse-back" class="btn text-btn" style="display: none;">← Back</button>
-                            <button id="refresh-replays" class="btn icon-btn" title="Refresh">↻</button>
-                        </div>
-                    </div>
-                    <div class="card-body">
-                        <div class="selection-controls">
-                            <div class="btn-group">
-                                <button id="select-all" class="btn small-btn">All</button>
-                                <button id="deselect-all" class="btn small-btn">None</button>
-                                <div class="select-last-group">
-                                    <input type="number" id="select-last-count" class="select-last-input" placeholder="X" min="1" value="10">
-                                    <button id="select-last" class="btn small-btn">Last X</button>
+                        <div class="card-body">
+                            <div class="selection-controls">
+                                <div class="btn-group">
+                                    <button id="select-all" class="btn small-btn">All</button>
+                                    <button id="deselect-all" class="btn small-btn">None</button>
+                                    <div class="select-last-group">
+                                        <input type="number" id="select-last-count" class="select-last-input" placeholder="X" min="1" value="10">
+                                        <button id="select-last" class="btn small-btn">Last X</button>
+                                    </div>
                                 </div>
+                                <button id="delete-selected" class="btn danger-btn small-btn">Delete Selected</button>
                             </div>
-                            <button id="delete-selected" class="btn danger-btn small-btn">Delete Selected</button>
+                            <div id="replay-list" class="replay-list custom-scrollbar">
+                                <p class="loading">Loading replays...</p>
+                            </div>
                         </div>
-                        <div id="replay-list" class="replay-list custom-scrollbar">
-                            <p class="loading">Loading replays...</p>
-                        </div>
-                    </div>
-                </section>
+                    </section>
 
-                <section id="parse-section" class="card">
+                    <div class="browse-sidebar">
+                        <section id="history-section" class="card">
+                            <div class="card-header">
+                                <h2>Match History</h2>
+                            </div>
+                            <div class="card-body">
+                                <div class="input-group">
+                                    <label for="history-steam-id">Steam ID</label>
+                                    <input type="number" id="history-steam-id" placeholder="e.g. 76561198...">
+                                </div>
+                                <div class="input-group">
+                                    <label for="history-limit">Limit</label>
+                                    <div class="row-group">
+                                        <input type="number" id="history-limit" value="10" min="1" max="100">
+                                        <button id="fetch-history" class="btn secondary-btn">Fetch</button>
+                                    </div>
+                                </div>
+                                <div class="input-group">
+                                    <label>
+                                        <input type="checkbox" id="history-turbo-only">
+                                        Turbo games only
+                                    </label>
+                                </div>
+                                <p class="status-text" style="color: var(--text-secondary); font-size: 0.85em; margin-top: 10px;">
+                                    Steam connection required
+                                </p>
+                                <p id="download-status" class="download-status hidden"></p>
+                                <div id="history-results" class="history-list custom-scrollbar"></div>
+                            </div>
+                        </section>
+
+                        <section id="fatal-search-section" class="card">
+                            <div class="card-header">
+                                <h2>Fatal Game Search</h2>
+                            </div>
+                            <div class="card-body">
+                                <div class="input-group">
+                                    <label for="fatal-steam-id">Steam ID</label>
+                                    <input type="number" id="fatal-steam-id" placeholder="Auto-filled from profile">
+                                </div>
+                                <div class="input-group">
+                                    <label for="fatal-max-depth">Max Depth</label>
+                                    <input type="number" id="fatal-max-depth" value="1" min="1" max="10">
+                                    <small>Number of LowPriority sessions to search</small>
+                                </div>
+                                <div class="input-group">
+                                    <label for="fatal-games-per">Games Per Fatal</label>
+                                    <input type="number" id="fatal-games-per" value="2" min="1" max="15">
+                                    <small>Games to download at each fatal game</small>
+                                </div>
+                                <button id="find-fatal-games" class="btn secondary-btn">Find Fatal Games</button>
+                                <p class="status-text" style="color: var(--text-secondary); font-size: 0.85em; margin-top: 10px;">
+                                    Steam connection required
+                                </p>
+                                <div id="fatal-results" class="history-list custom-scrollbar" style="margin-top: 15px; max-height: 300px;"></div>
+                            </div>
+                        </section>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tab-content" id="analyze-tab">
+                <section id="parse-section" class="card main-card">
                     <div class="card-header">
                         <h2>Analysis Options</h2>
                     </div>
@@ -189,7 +213,7 @@
                     </div>
                 </section>
 
-                <section id="progress-section" class="card hidden">
+                <section id="progress-section" class="card main-card hidden">
                     <div class="card-body">
                         <div class="progress-info">
                             <h3>Processing...</h3>
@@ -200,10 +224,12 @@
                         </div>
                     </div>
                 </section>
+            </div>
 
-                <section id="results-section" class="card hidden">
+            <div class="tab-content" id="results-tab">
+                <section id="results-section" class="card main-card hidden">
                     <div class="card-header">
-                        <h2>Results</h2>
+                        <h2>Analysis Results</h2>
                     </div>
                     <div class="card-body">
                         <div id="match-selector-container" class="match-selector-container hidden">
@@ -224,13 +250,13 @@
                         </div>
                         <div class="timeline-graph-header">
                             <div class="graph-view-selector">
-                                <button class="graph-view-tab" data-view="reports" title="Report Timestamps">
+                                <button class="graph-view-tab" data-view="reports" title="Incoming Reports">
                                     <span class="tab-icon">📊</span>
-                                    <span class="tab-label">Report Timestamps</span>
+                                    <span class="tab-label">Incoming Reports</span>
                                 </button>
-                                <button class="graph-view-tab active" data-view="playerReports" title="Player Reports">
+                                <button class="graph-view-tab active" data-view="playerReports" title="Outgoing Reports">
                                     <span class="tab-icon">👤</span>
-                                    <span class="tab-label">Player Reports</span>
+                                    <span class="tab-label">Outgoing Reports</span>
                                 </button>
                                 <button class="graph-view-tab" data-view="scoreboard" title="Scoreboard Activity">
                                     <span class="tab-icon">📈</span>
