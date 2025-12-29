@@ -972,6 +972,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let validateReportCardInProgress = false;
 
+    let validateReportCardEventSource = null;
+
     function validateReportCard(matchId, accountId, isCurrent) {
         const statusDiv = document.getElementById('validate-report-card-status');
         const btn = isCurrent ? document.getElementById('validate-report-card-current-btn') : document.getElementById('validate-report-card-btn');
@@ -985,14 +987,90 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         
+        if (validateReportCardEventSource) {
+            validateReportCardEventSource.close();
+            validateReportCardEventSource = null;
+        }
+        
         validateReportCardInProgress = true;
         btn.disabled = true;
         if (otherBtn) otherBtn.disabled = true;
         btn.textContent = isCurrent ? 'Fetching Current...' : 'Validating...';
-        statusDiv.textContent = isCurrent ? 'Fetching games after match ID...' : 'Fetching match history and downloading replays (this may take several minutes)...';
+        statusDiv.innerHTML = '<div>Initializing...</div>';
         statusDiv.style.color = 'var(--text-secondary)';
         
         const endpoint = isCurrent ? '/api/steam/validate-report-card-current' : '/api/steam/validate-report-card';
+        const statusEndpoint = `/api/steam/validate-report-card-status?matchId=${matchId}`;
+        
+        validateReportCardEventSource = new EventSource(statusEndpoint);
+        
+        validateReportCardEventSource.onmessage = function(event) {
+            try {
+                const status = JSON.parse(event.data);
+                
+                if (status.phase === 'not_found') {
+                    return;
+                }
+                
+                let html = `<div><strong>${status.message || 'Processing...'}</strong></div>`;
+                
+                if (status.phase === 'downloading') {
+                    html += `<div style="margin-top: 8px; font-size: 0.9em;">`;
+                    html += `Total: ${status.total || 0} | `;
+                    html += `Downloaded: ${status.downloaded || 0} | `;
+                    html += `Skipped: ${status.skipped || 0}`;
+                    if (status.currentMatch) {
+                        html += `<br>Current: ${status.currentMatch}`;
+                    }
+                    html += `</div>`;
+                } else if (status.phase === 'parsing') {
+                    html += `<div style="margin-top: 8px; font-size: 0.9em;">`;
+                    html += `Parsed: ${status.parsed || 0} / ${status.total || 0} | `;
+                    html += `Errors: ${status.parseErrors || 0}`;
+                    if (status.currentMatch) {
+                        html += `<br>Current: ${status.currentMatch}`;
+                    }
+                    html += `</div>`;
+                } else if (status.phase === 'complete' && status.results) {
+                    html += `<div style="margin-top: 12px; padding: 8px; background: var(--bg-secondary); border-radius: 4px;">`;
+                    html += `<div><strong>Validation Results:</strong></div>`;
+                    html += `<div style="margin-top: 8px;">`;
+                    html += `Total Matches: ${status.results.totalMatches}<br>`;
+                    html += `Total Reports: ${status.results.totalReports}<br>`;
+                    html += `Team Reports: ${status.results.teamReports}<br>`;
+                    html += `Enemy Reports: ${status.results.enemyReports}`;
+                    html += `</div>`;
+                    html += `</div>`;
+                    statusDiv.style.color = 'var(--success-color)';
+                    validateReportCardInProgress = false;
+                    btn.disabled = false;
+                    btn.textContent = isCurrent ? 'Current' : 'Validate Report Card';
+                    if (otherBtn) otherBtn.disabled = false;
+                    if (validateReportCardEventSource) {
+                        validateReportCardEventSource.close();
+                        validateReportCardEventSource = null;
+                    }
+                }
+                
+                if (status.errors && status.errors.length > 0) {
+                    html += `<div style="margin-top: 8px; color: var(--warning-color); font-size: 0.85em;">`;
+                    html += `Errors: ${status.errors.join(', ')}`;
+                    html += `</div>`;
+                }
+                
+                statusDiv.innerHTML = html;
+            } catch (e) {
+                console.error('Error parsing status:', e);
+            }
+        };
+        
+        validateReportCardEventSource.onerror = function(event) {
+            console.error('EventSource error:', event);
+            if (validateReportCardEventSource) {
+                validateReportCardEventSource.close();
+                validateReportCardEventSource = null;
+            }
+        };
         
         fetch(endpoint, {
             method: 'POST',
@@ -1011,35 +1089,26 @@ document.addEventListener('DOMContentLoaded', () => {
                 return res.json();
             })
             .then(data => {
-                const total = data.total || 0;
-                const downloaded = data.downloaded?.length || 0;
-                const skipped = data.skipped?.length || 0;
-                const errors = data.errors?.length || 0;
-                
-                let message = '';
-                if (data.message) {
-                    message = data.message;
-                } else {
-                    message = `Downloaded: ${downloaded}, Skipped: ${skipped}`;
-                    if (errors > 0) {
-                        message += `, Errors: ${errors}`;
+                if (data.results) {
+                    let html = `<div><strong>${data.results.totalReports} total reports found</strong></div>`;
+                    html += `<div style="margin-top: 8px; font-size: 0.9em;">`;
+                    html += `Downloaded: ${data.downloaded?.length || 0} | `;
+                    html += `Skipped: ${data.skipped?.length || 0} | `;
+                    html += `Parsed: ${data.parsed || 0}`;
+                    html += `</div>`;
+                    if (data.directory) {
+                        html += `<div style="margin-top: 4px; font-size: 0.85em; color: var(--text-secondary);">Saved to: ${data.directory}</div>`;
                     }
-                    message += ` (Total: ${total})`;
+                    statusDiv.innerHTML = html;
+                    statusDiv.style.color = 'var(--success-color)';
                 }
-                
-                if (data.directory) {
-                    message += `\nSaved to: ${data.directory}`;
-                }
-                
-                statusDiv.textContent = message;
-                statusDiv.style.color = errors > 0 ? 'var(--warning-color)' : (data.message && data.message.includes('not downloading') ? 'var(--text-secondary)' : 'var(--success-color)');
-                validateReportCardInProgress = false;
-                btn.disabled = false;
-                btn.textContent = isCurrent ? 'Current' : 'Validate Report Card';
-                if (otherBtn) otherBtn.disabled = false;
             })
             .catch(err => {
                 console.error('Error validating report card:', err);
+                if (validateReportCardEventSource) {
+                    validateReportCardEventSource.close();
+                    validateReportCardEventSource = null;
+                }
                 if (err.name === 'AbortError' || err.message.includes('aborted')) {
                     statusDiv.textContent = 'Request was cancelled. The download may still be in progress on the server.';
                     statusDiv.style.color = 'var(--warning-color)';

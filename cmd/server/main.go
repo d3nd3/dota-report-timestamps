@@ -121,6 +121,7 @@ func main() {
 	http.HandleFunc("/api/steam/conduct-scorecard", handleConductScorecard)
 	http.HandleFunc("/api/steam/validate-report-card", handleValidateReportCard)
 	http.HandleFunc("/api/steam/validate-report-card-current", handleValidateReportCardCurrent)
+	http.HandleFunc("/api/steam/validate-report-card-status", handleValidateReportCardStatus)
 
 	fmt.Println("Server started at http://localhost:8081")
 	log.Fatal(http.ListenAndServe(":8081", nil))

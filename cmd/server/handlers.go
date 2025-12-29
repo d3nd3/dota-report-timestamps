@@ -25,7 +25,38 @@ import (
 var (
 	validateReportCardLocks sync.Map // Map[uint64]*sync.Mutex to prevent concurrent validate report card requests for the same match ID
 	validateReportCardInProgress sync.Map // Map[uint64]bool to track in-progress requests
+	validateReportCardStatus sync.Map // Map[uint64]*ValidateReportCardStatus for SSE status updates
 )
+
+type ValidateReportCardStatus struct {
+	mu            sync.RWMutex
+	Phase         string   `json:"phase"` // "downloading", "parsing", "complete"
+	Message       string   `json:"message"`
+	Total         int      `json:"total"`
+	Downloaded    int      `json:"downloaded"`
+	Skipped       int      `json:"skipped"`
+	Parsed        int      `json:"parsed"`
+	ParseErrors   int      `json:"parseErrors"`
+	CurrentMatch  int64    `json:"currentMatch"`
+	Errors        []string `json:"errors"`
+	Results       *ValidateReportCardResults `json:"results,omitempty"`
+}
+
+type ValidateReportCardResults struct {
+	TotalMatches      int                   `json:"totalMatches"`
+	TotalReports      int                   `json:"totalReports"`
+	TeamReports       int                   `json:"teamReports"`
+	EnemyReports      int                   `json:"enemyReports"`
+	MatchResults      []MatchParseResult    `json:"matchResults"`
+}
+
+type MatchParseResult struct {
+	MatchID      int64  `json:"matchId"`
+	Reports      int    `json:"reports"`
+	TeamReports  int    `json:"teamReports"`
+	EnemyReports int    `json:"enemyReports"`
+	Error        string `json:"error,omitempty"`
+}
 
 // convertSteamID ensures we have the correct format.
 // If input < 76561197960265728, assumes it's AccountID (32-bit) and converts to SteamID64 if to64 is true.
@@ -269,6 +300,23 @@ type ValidateReportCardRequest struct {
 	AccountID uint32 `json:"accountId,omitempty"`
 }
 
+func updateValidateStatus(matchID uint64, phase, message string) {
+	if statusInterface, ok := validateReportCardStatus.Load(matchID); ok {
+		validateStatus := statusInterface.(*ValidateReportCardStatus)
+		validateStatus.mu.Lock()
+		validateStatus.Phase = phase
+		validateStatus.Message = message
+		validateStatus.mu.Unlock()
+	}
+}
+
+func getValidateStatus(matchID uint64) *ValidateReportCardStatus {
+	if statusInterface, ok := validateReportCardStatus.Load(matchID); ok {
+		return statusInterface.(*ValidateReportCardStatus)
+	}
+	return nil
+}
+
 func handleValidateReportCard(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -326,12 +374,20 @@ func handleValidateReportCard(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	validateReportCardInProgress.Store(req.MatchID, true)
+	validateStatus := &ValidateReportCardStatus{
+		Phase:  "downloading",
+		Message: "Initializing...",
+		Errors: make([]string, 0),
+	}
+	validateReportCardStatus.Store(req.MatchID, validateStatus)
 	defer func() {
 		validateReportCardInProgress.Delete(req.MatchID)
+		validateReportCardStatus.Delete(req.MatchID)
 		lock.Unlock()
 	}()
 
 	log.Printf("[ValidateReportCard] Starting validation for match %d, steamID %d", req.MatchID, steamID64)
+	updateValidateStatus(req.MatchID, "downloading", "Fetching match history...")
 
 	reportCardsDir := filepath.Join(config.ReplayDir, "reportcards", fmt.Sprintf("%d", req.MatchID))
 	if err := os.MkdirAll(reportCardsDir, os.ModePerm); err != nil {
@@ -424,12 +480,20 @@ func handleValidateReportCard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[ValidateReportCard] Found %d ranked matches to download", len(rankedMatches))
+	validateStatus.mu.Lock()
+	validateStatus.Total = len(rankedMatches)
+	validateStatus.mu.Unlock()
+	updateValidateStatus(req.MatchID, "downloading", fmt.Sprintf("Downloading %d matches...", len(rankedMatches)))
 
 	var downloaded []int64
 	var skipped []int64
 	var errors []string
 
-	for _, matchID := range rankedMatches {
+	for i, matchID := range rankedMatches {
+		validateStatus.mu.Lock()
+		validateStatus.CurrentMatch = matchID
+		validateStatus.Message = fmt.Sprintf("Downloading match %d (%d/%d)...", matchID, i+1, len(rankedMatches))
+		validateStatus.mu.Unlock()
 		filePath := filepath.Join(reportCardsDir, fmt.Sprintf("%d.dem", matchID))
 		if _, err := os.Stat(filePath); err == nil {
 			log.Printf("[ValidateReportCard] Match %d already exists, skipping", matchID)
@@ -466,19 +530,174 @@ func handleValidateReportCard(w http.ResponseWriter, r *http.Request) {
 		if _, err := os.Stat(filePath); err == nil {
 			downloaded = append(downloaded, matchID)
 			log.Printf("[ValidateReportCard] Successfully downloaded match %d", matchID)
+			validateStatus.mu.Lock()
+			validateStatus.Downloaded++
+			validateStatus.mu.Unlock()
 		} else {
 			log.Printf("[ValidateReportCard] Match %d download reported success but file not found, may be queued", matchID)
 			errors = append(errors, fmt.Sprintf("Match %d queued for parsing", matchID))
+			validateStatus.mu.Lock()
+			validateStatus.Errors = append(validateStatus.Errors, fmt.Sprintf("Match %d queued for parsing", matchID))
+			validateStatus.mu.Unlock()
 		}
 	}
 
+	validateStatus.mu.Lock()
+	validateStatus.Skipped = len(skipped)
+	validateStatus.mu.Unlock()
+
+	updateValidateStatus(req.MatchID, "parsing", fmt.Sprintf("Parsing %d matches...", len(downloaded)+len(skipped)))
+
+	var reportedSteamID uint64 = uint64(steamID64)
+	if reportedSteamID > 0 {
+		reportedSteamID = convertSteamID(reportedSteamID, true)
+	}
+
+	var matchResults []MatchParseResult
+	totalReports := 0
+	totalTeamReports := 0
+	totalEnemyReports := 0
+	parsedCount := 0
+	parseErrorCount := 0
+
+	allMatches := append(downloaded, skipped...)
+	for i, matchID := range allMatches {
+		validateStatus.mu.Lock()
+		validateStatus.CurrentMatch = matchID
+		validateStatus.Message = fmt.Sprintf("Parsing match %d (%d/%d)...", matchID, i+1, len(allMatches))
+		validateStatus.mu.Unlock()
+
+		filePath := filepath.Join(reportCardsDir, fmt.Sprintf("%d.dem", matchID))
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			matchResults = append(matchResults, MatchParseResult{
+				MatchID: matchID,
+				Error:   "File not found",
+			})
+			validateStatus.mu.Lock()
+			parseErrorCount++
+			validateStatus.ParseErrors++
+			validateStatus.mu.Unlock()
+			continue
+		}
+
+		file, err := os.Open(filePath)
+		if err != nil {
+			matchResults = append(matchResults, MatchParseResult{
+				MatchID: matchID,
+				Error:   fmt.Sprintf("Failed to open file: %v", err),
+			})
+			validateStatus.mu.Lock()
+			parseErrorCount++
+			validateStatus.ParseErrors++
+			validateStatus.mu.Unlock()
+			continue
+		}
+
+		players, err := parser.ExtractPlayerInfo(matchID, file)
+		file.Close()
+		if err != nil {
+			matchResults = append(matchResults, MatchParseResult{
+				MatchID: matchID,
+				Error:   fmt.Sprintf("Failed to extract player info: %v", err),
+			})
+			validateStatus.mu.Lock()
+			parseErrorCount++
+			validateStatus.ParseErrors++
+			validateStatus.mu.Unlock()
+			continue
+		}
+
+		var reportedSlot int = -1
+		for _, p := range players {
+			if p.SteamID == reportedSteamID {
+				reportedSlot = p.Slot
+				break
+			}
+		}
+
+		if reportedSlot == -1 {
+			matchResults = append(matchResults, MatchParseResult{
+				MatchID: matchID,
+				Error:   "Reported player not found in match",
+			})
+			validateStatus.mu.Lock()
+			parseErrorCount++
+			validateStatus.ParseErrors++
+			validateStatus.mu.Unlock()
+			continue
+		}
+
+		file, err = os.Open(filePath)
+		if err != nil {
+			matchResults = append(matchResults, MatchParseResult{
+				MatchID: matchID,
+				Error:   fmt.Sprintf("Failed to reopen file: %v", err),
+			})
+			validateStatus.mu.Lock()
+			parseErrorCount++
+			validateStatus.ParseErrors++
+			validateStatus.mu.Unlock()
+			continue
+		}
+
+		result, err := parser.ParseReplay(matchID, file, reportedSlot, reportedSteamID)
+		file.Close()
+		if err != nil {
+			matchResults = append(matchResults, MatchParseResult{
+				MatchID: matchID,
+				Error:   fmt.Sprintf("Parse error: %v", err),
+			})
+			validateStatus.mu.Lock()
+			parseErrorCount++
+			validateStatus.ParseErrors++
+			validateStatus.mu.Unlock()
+			continue
+		}
+
+		matchResults = append(matchResults, MatchParseResult{
+			MatchID:      matchID,
+			Reports:      len(result.Reports),
+			TeamReports: result.TeamReports,
+			EnemyReports: result.EnemyReports,
+		})
+
+		totalReports += len(result.Reports)
+		totalTeamReports += result.TeamReports
+		totalEnemyReports += result.EnemyReports
+
+		validateStatus.mu.Lock()
+		parsedCount++
+		validateStatus.Parsed++
+		validateStatus.mu.Unlock()
+	}
+
+	results := &ValidateReportCardResults{
+		TotalMatches: len(allMatches),
+		TotalReports: totalReports,
+		TeamReports:  totalTeamReports,
+		EnemyReports: totalEnemyReports,
+		MatchResults: matchResults,
+	}
+
+	validateStatus.mu.Lock()
+	validateStatus.Phase = "complete"
+	validateStatus.Message = fmt.Sprintf("Complete! Parsed %d matches, found %d total reports", parsedCount, totalReports)
+	validateStatus.Results = results
+	validateStatus.mu.Unlock()
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":   true,
-		"downloaded": downloaded,
-		"skipped":   skipped,
-		"errors":    errors,
-		"total":     len(rankedMatches),
-		"directory": reportCardsDir,
+		"success":      true,
+		"downloaded":   downloaded,
+		"skipped":      skipped,
+		"errors":       errors,
+		"total":        len(rankedMatches),
+		"directory":    reportCardsDir,
+		"parsed":       parsedCount,
+		"parseErrors":  parseErrorCount,
+		"totalReports": totalReports,
+		"teamReports":  totalTeamReports,
+		"enemyReports": totalEnemyReports,
+		"results":      results,
 	})
 }
 
@@ -540,12 +759,20 @@ func handleValidateReportCardCurrent(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	validateReportCardInProgress.Store(currentKey, true)
+	validateStatus := &ValidateReportCardStatus{
+		Phase:  "downloading",
+		Message: "Initializing...",
+		Errors: make([]string, 0),
+	}
+	validateReportCardStatus.Store(currentKey, validateStatus)
 	defer func() {
 		validateReportCardInProgress.Delete(currentKey)
+		validateReportCardStatus.Delete(currentKey)
 		lock.Unlock()
 	}()
 
 	log.Printf("[ValidateReportCardCurrent] Starting validation for games after match %d, steamID %d", req.MatchID, steamID64)
+	updateValidateStatus(currentKey, "downloading", "Fetching match history...")
 
 	reportCardsCurrentDir := filepath.Join(config.ReplayDir, "reportcards", "current")
 	if err := os.MkdirAll(reportCardsCurrentDir, os.ModePerm); err != nil {
@@ -646,12 +873,20 @@ func handleValidateReportCardCurrent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("[ValidateReportCardCurrent] Found %d ranked matches to download (less than %d)", len(rankedMatches), maxGames)
+	validateStatus.mu.Lock()
+	validateStatus.Total = len(rankedMatches)
+	validateStatus.mu.Unlock()
+	updateValidateStatus(currentKey, "downloading", fmt.Sprintf("Downloading %d matches...", len(rankedMatches)))
 
 	var downloaded []int64
 	var skipped []int64
 	var errors []string
 
-	for _, matchID := range rankedMatches {
+	for i, matchID := range rankedMatches {
+		validateStatus.mu.Lock()
+		validateStatus.CurrentMatch = matchID
+		validateStatus.Message = fmt.Sprintf("Downloading match %d (%d/%d)...", matchID, i+1, len(rankedMatches))
+		validateStatus.mu.Unlock()
 		filePath := filepath.Join(reportCardsCurrentDir, fmt.Sprintf("%d.dem", matchID))
 		if _, err := os.Stat(filePath); err == nil {
 			log.Printf("[ValidateReportCardCurrent] Match %d already exists, skipping", matchID)
@@ -688,19 +923,174 @@ func handleValidateReportCardCurrent(w http.ResponseWriter, r *http.Request) {
 		if _, err := os.Stat(filePath); err == nil {
 			downloaded = append(downloaded, matchID)
 			log.Printf("[ValidateReportCardCurrent] Successfully downloaded match %d", matchID)
+			validateStatus.mu.Lock()
+			validateStatus.Downloaded++
+			validateStatus.mu.Unlock()
 		} else {
 			log.Printf("[ValidateReportCardCurrent] Match %d download reported success but file not found, may be queued", matchID)
 			errors = append(errors, fmt.Sprintf("Match %d queued for parsing", matchID))
+			validateStatus.mu.Lock()
+			validateStatus.Errors = append(validateStatus.Errors, fmt.Sprintf("Match %d queued for parsing", matchID))
+			validateStatus.mu.Unlock()
 		}
 	}
 
+	validateStatus.mu.Lock()
+	validateStatus.Skipped = len(skipped)
+	validateStatus.mu.Unlock()
+
+	updateValidateStatus(currentKey, "parsing", fmt.Sprintf("Parsing %d matches...", len(downloaded)+len(skipped)))
+
+	var reportedSteamID uint64 = uint64(steamID64)
+	if reportedSteamID > 0 {
+		reportedSteamID = convertSteamID(reportedSteamID, true)
+	}
+
+	var matchResults []MatchParseResult
+	totalReports := 0
+	totalTeamReports := 0
+	totalEnemyReports := 0
+	parsedCount := 0
+	parseErrorCount := 0
+
+	allMatches := append(downloaded, skipped...)
+	for i, matchID := range allMatches {
+		validateStatus.mu.Lock()
+		validateStatus.CurrentMatch = matchID
+		validateStatus.Message = fmt.Sprintf("Parsing match %d (%d/%d)...", matchID, i+1, len(allMatches))
+		validateStatus.mu.Unlock()
+
+		filePath := filepath.Join(reportCardsCurrentDir, fmt.Sprintf("%d.dem", matchID))
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			matchResults = append(matchResults, MatchParseResult{
+				MatchID: matchID,
+				Error:   "File not found",
+			})
+			validateStatus.mu.Lock()
+			parseErrorCount++
+			validateStatus.ParseErrors++
+			validateStatus.mu.Unlock()
+			continue
+		}
+
+		file, err := os.Open(filePath)
+		if err != nil {
+			matchResults = append(matchResults, MatchParseResult{
+				MatchID: matchID,
+				Error:   fmt.Sprintf("Failed to open file: %v", err),
+			})
+			validateStatus.mu.Lock()
+			parseErrorCount++
+			validateStatus.ParseErrors++
+			validateStatus.mu.Unlock()
+			continue
+		}
+
+		players, err := parser.ExtractPlayerInfo(matchID, file)
+		file.Close()
+		if err != nil {
+			matchResults = append(matchResults, MatchParseResult{
+				MatchID: matchID,
+				Error:   fmt.Sprintf("Failed to extract player info: %v", err),
+			})
+			validateStatus.mu.Lock()
+			parseErrorCount++
+			validateStatus.ParseErrors++
+			validateStatus.mu.Unlock()
+			continue
+		}
+
+		var reportedSlot int = -1
+		for _, p := range players {
+			if p.SteamID == reportedSteamID {
+				reportedSlot = p.Slot
+				break
+			}
+		}
+
+		if reportedSlot == -1 {
+			matchResults = append(matchResults, MatchParseResult{
+				MatchID: matchID,
+				Error:   "Reported player not found in match",
+			})
+			validateStatus.mu.Lock()
+			parseErrorCount++
+			validateStatus.ParseErrors++
+			validateStatus.mu.Unlock()
+			continue
+		}
+
+		file, err = os.Open(filePath)
+		if err != nil {
+			matchResults = append(matchResults, MatchParseResult{
+				MatchID: matchID,
+				Error:   fmt.Sprintf("Failed to reopen file: %v", err),
+			})
+			validateStatus.mu.Lock()
+			parseErrorCount++
+			validateStatus.ParseErrors++
+			validateStatus.mu.Unlock()
+			continue
+		}
+
+		result, err := parser.ParseReplay(matchID, file, reportedSlot, reportedSteamID)
+		file.Close()
+		if err != nil {
+			matchResults = append(matchResults, MatchParseResult{
+				MatchID: matchID,
+				Error:   fmt.Sprintf("Parse error: %v", err),
+			})
+			validateStatus.mu.Lock()
+			parseErrorCount++
+			validateStatus.ParseErrors++
+			validateStatus.mu.Unlock()
+			continue
+		}
+
+		matchResults = append(matchResults, MatchParseResult{
+			MatchID:      matchID,
+			Reports:      len(result.Reports),
+			TeamReports: result.TeamReports,
+			EnemyReports: result.EnemyReports,
+		})
+
+		totalReports += len(result.Reports)
+		totalTeamReports += result.TeamReports
+		totalEnemyReports += result.EnemyReports
+
+		validateStatus.mu.Lock()
+		parsedCount++
+		validateStatus.Parsed++
+		validateStatus.mu.Unlock()
+	}
+
+	results := &ValidateReportCardResults{
+		TotalMatches: len(allMatches),
+		TotalReports: totalReports,
+		TeamReports:  totalTeamReports,
+		EnemyReports: totalEnemyReports,
+		MatchResults: matchResults,
+	}
+
+	validateStatus.mu.Lock()
+	validateStatus.Phase = "complete"
+	validateStatus.Message = fmt.Sprintf("Complete! Parsed %d matches, found %d total reports", parsedCount, totalReports)
+	validateStatus.Results = results
+	validateStatus.mu.Unlock()
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":   true,
-		"downloaded": downloaded,
-		"skipped":   skipped,
-		"errors":    errors,
-		"total":     len(rankedMatches),
-		"directory": reportCardsCurrentDir,
+		"success":      true,
+		"downloaded":   downloaded,
+		"skipped":      skipped,
+		"errors":       errors,
+		"total":        len(rankedMatches),
+		"directory":    reportCardsCurrentDir,
+		"parsed":       parsedCount,
+		"parseErrors":  parseErrorCount,
+		"totalReports": totalReports,
+		"teamReports":  totalTeamReports,
+		"enemyReports": totalEnemyReports,
+		"results":      results,
 	})
 }
 
@@ -2094,6 +2484,58 @@ func fetchAdditionalGames(steamID int64, singleDraftMatchID int64, fatalMatchID 
 
 	log.Printf("Found %d additional games before singledraft %d: %v", len(additionalMatches), singleDraftMatchID, additionalMatches)
 	return additionalMatches
+}
+
+func handleValidateReportCardStatus(w http.ResponseWriter, r *http.Request) {
+	matchIDStr := r.URL.Query().Get("matchId")
+	if matchIDStr == "" {
+		http.Error(w, "Missing matchId parameter", http.StatusBadRequest)
+		return
+	}
+
+	matchID, err := strconv.ParseUint(matchIDStr, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid matchId", http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	timeout := time.After(30 * time.Minute)
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-timeout:
+			return
+		case <-ticker.C:
+			status := getValidateStatus(matchID)
+			if status == nil {
+				fmt.Fprintf(w, "data: %s\n\n", `{"phase":"not_found"}`)
+				w.(http.Flusher).Flush()
+				continue
+			}
+
+			status.mu.RLock()
+			statusJSON, _ := json.Marshal(status)
+			status.mu.RUnlock()
+
+			fmt.Fprintf(w, "data: %s\n\n", string(statusJSON))
+			w.(http.Flusher).Flush()
+
+			if status.Phase == "complete" {
+				time.Sleep(1 * time.Second)
+				return
+			}
+		}
+	}
 }
 
 func handleProgress(w http.ResponseWriter, r *http.Request) {
