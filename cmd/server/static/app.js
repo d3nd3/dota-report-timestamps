@@ -716,8 +716,8 @@ document.addEventListener('DOMContentLoaded', () => {
         
         if (status === 1) {
             if (lastSteamStatus !== 1) {
-                steamStatusText.style.color = '#ff9800';
-                steamGuardGroup.classList.add('hidden');
+                if (steamStatusText) steamStatusText.style.color = '#ff9800';
+                if (steamGuardGroup) steamGuardGroup.classList.add('hidden');
                 steamLoginBtn.textContent = 'Connecting...';
                 steamLoginBtn.disabled = true;
                 steamDisconnectBtn.style.display = 'none';
@@ -731,14 +731,24 @@ document.addEventListener('DOMContentLoaded', () => {
                     console.warn('Connection timeout - re-enabling button as fallback');
                     steamLoginBtn.disabled = false;
                     steamLoginBtn.textContent = 'Connect to Steam';
-                    steamStatusText.textContent = 'Status: Disconnected (timeout)';
-                    steamStatusText.style.color = '';
+                    if (steamStatusText) {
+                        steamStatusText.textContent = 'Status: Disconnected (timeout)';
+                        steamStatusText.style.color = '';
+                    }
                 }
             }, 20000);
         } else if (status === 2) {
             if (lastSteamStatus !== 2) {
-                steamStatusText.style.color = '#ff9800';
-                steamGuardGroup.classList.remove('hidden');
+                if (steamStatusText) steamStatusText.style.color = '#ff9800';
+                if (setupPanel) {
+                    setupPanel.classList.remove('hidden');
+                }
+                if (steamGuardGroup) {
+                    steamGuardGroup.classList.remove('hidden');
+                    console.log('Steam Guard field should now be visible');
+                } else {
+                    console.error('steamGuardGroup element not found!');
+                }
                 if (steamLoginBtn.textContent === 'Submitting Code...') {
                     submittingTimeoutId = setTimeout(() => {
                         if (steamLoginBtn.disabled && steamLoginBtn.textContent === 'Submitting Code...') {
@@ -758,10 +768,10 @@ document.addEventListener('DOMContentLoaded', () => {
             steamPollingInterval = setInterval(pollSteamStatus, 2000);
         } else if (status === 3 || status === 4) {
              if (lastSteamStatus !== status) {
-                 steamStatusText.style.color = '#4caf50';
+                 if (steamStatusText) steamStatusText.style.color = '#4caf50';
                  steamLoginBtn.textContent = status === 4 ? 'Connected' : 'Connecting...';
                  steamLoginBtn.disabled = true;
-                 steamGuardGroup.classList.add('hidden');
+                 if (steamGuardGroup) steamGuardGroup.classList.add('hidden');
                  steamDisconnectBtn.style.display = 'inline-block';
                  lastSteamStatus = status;
                  if (status === 4) {
@@ -772,11 +782,13 @@ document.addEventListener('DOMContentLoaded', () => {
              steamPollingInterval = setInterval(pollSteamStatus, 10000);
         } else if (status === 5) { // Rate Limited
              if (lastSteamStatus !== 5) {
-                 steamStatusText.style.color = '#f44336';
-                 steamStatusText.textContent = 'Status: Rate Limited (Wait 24h)';
+                 if (steamStatusText) {
+                     steamStatusText.style.color = '#f44336';
+                     steamStatusText.textContent = 'Status: Rate Limited (Wait 24h)';
+                 }
                  steamLoginBtn.textContent = 'Rate Limited';
                  steamLoginBtn.disabled = true;
-                 steamGuardGroup.classList.add('hidden');
+                 if (steamGuardGroup) steamGuardGroup.classList.add('hidden');
                  steamDisconnectBtn.style.display = 'inline-block';
                  lastSteamStatus = 5;
              }
@@ -784,13 +796,14 @@ document.addEventListener('DOMContentLoaded', () => {
              steamPollingInterval = setInterval(pollSteamStatus, 60000);
         } else {
             if (lastSteamStatus !== status) {
-                steamStatusText.style.color = '';
-                steamGuardGroup.classList.add('hidden');
-                steamCodeInput.value = '';
+                if (steamStatusText) steamStatusText.style.color = '';
+                if (steamGuardGroup) steamGuardGroup.classList.add('hidden');
+                if (steamCodeInput) steamCodeInput.value = '';
                 steamLoginBtn.textContent = 'Connect to Steam';
                 steamLoginBtn.disabled = false;
                 steamDisconnectBtn.style.display = 'none';
-                document.getElementById('conduct-scorecard-section').classList.add('hidden');
+                const conductSection = document.getElementById('conduct-scorecard-section');
+                if (conductSection) conductSection.classList.add('hidden');
                 lastSteamStatus = status;
             }
             if (steamPollingInterval) clearInterval(steamPollingInterval);
