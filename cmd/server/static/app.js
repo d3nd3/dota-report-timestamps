@@ -1523,6 +1523,7 @@ document.addEventListener('DOMContentLoaded', () => {
             .then(res => res.json())
             .then(data => {
                 updateSteamUI(data.status, data.statusText, data.errorMessage);
+                if (window.updateDownloadMatchSteamHint) window.updateDownloadMatchSteamHint();
             })
             .catch(err => {
                 console.error('Steam status poll failed:', err);
@@ -1690,7 +1691,9 @@ document.addEventListener('DOMContentLoaded', () => {
     fetchWithRetry('/api/config', {}, 2, 1000)
         .then(res => res.json())
         .then(config => {
-            replayDirInput.value = config.replayDir || '';
+            if (!replayDirInput.value && config.replayDir) {
+                replayDirInput.value = config.replayDir;
+            }
             updatePathDisplay(currentPath, getSelectedProfileName());
 
             if (config.steamUser && config.steamUser.trim() !== '') {
