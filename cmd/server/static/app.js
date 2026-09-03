@@ -221,6 +221,40 @@ const DOTA_HEROES = [
     return `/api/hero-icon/${heroId}`;
 }
 
+function getHeroDisplayName(heroName) {
+    if (!heroName || heroName.toLowerCase() === 'unknown') return 'Unknown';
+
+    let cleanName = String(heroName).trim().replace(/^npc_dota_hero_/, '');
+
+    const normalizeHeroName = (name) => {
+        return name
+            .replace(/([a-z])([A-Z])/g, '$1_$2')
+            .toLowerCase()
+            .replace(/\s+/g, '_');
+    };
+
+    const heroNameVariations = {
+        'zuus': 'zeus',
+        'zeus': 'zuus',
+        'anti_mage': 'antimage',
+        'vengeful_spirit': 'vengefulspirit',
+        'queen_of_pain': 'queenofpain'
+    };
+
+    let normalized = normalizeHeroName(cleanName);
+    if (heroNameVariations[normalized]) {
+        normalized = heroNameVariations[normalized];
+    }
+
+    const hero = DOTA_HEROES.find(h =>
+        h.id === normalized ||
+        normalizeHeroName(h.name) === normalized ||
+        normalizeHeroName(h.localized_name) === normalized
+    );
+
+    return hero ? (hero.localized_name || hero.name) : cleanName;
+}
+
 // Retry utility with exponential backoff
 async function fetchWithRetry(url, options = {}, maxRetries = 3, baseDelay = 1000) {
     let lastError;
@@ -314,6 +348,55 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     }
+
+    function updateGraphTabsVisibility() {
+        const isAllPlayers = !currentSelectedPlayer;
+
+        const genericTab = Array.from(graphViewTabs).find(tab =>
+            tab.dataset.view === 'allReports' || tab.dataset.view === 'all'
+        );
+
+        graphViewTabs.forEach(tab => {
+            if (!tab.dataset.originalText) {
+                tab.dataset.originalText = tab.textContent.trim();
+            }
+            const view = tab.dataset.view;
+            if (genericTab) {
+                if (view === 'allReports' || view === 'all') {
+                    tab.style.display = isAllPlayers ? '' : 'none';
+                } else if (view === 'playerReports' || view === 'reports') {
+                    tab.style.display = isAllPlayers ? 'none' : '';
+                }
+            } else {
+                if (isAllPlayers) {
+                    if (view === 'playerReports') {
+                        tab.style.display = 'none';
+                    } else if (view === 'reports') {
+                        tab.style.display = '';
+                        tab.textContent = 'Reports';
+                    }
+                } else {
+                    if (view === 'playerReports') {
+                        tab.style.display = '';
+                        tab.textContent = tab.dataset.originalText || 'Outgoing Reports';
+                    } else if (view === 'reports') {
+                        tab.style.display = '';
+                        tab.textContent = tab.dataset.originalText || 'Incoming Reports';
+                    }
+                }
+            }
+        });
+
+        if (isAllPlayers) {
+            if (genericTab && (currentGraphView === 'playerReports' || currentGraphView === 'reports')) {
+                currentGraphView = genericTab.dataset.view;
+            } else if (!genericTab && currentGraphView === 'playerReports') {
+                currentGraphView = 'reports';
+            }
+        }
+
+        updateGraphViewTabs();
+    }
     
     function showGraphLoading() {
         console.log('[GRAPH DEBUG] showGraphLoading() called');
@@ -362,7 +445,9 @@ document.addEventListener('DOMContentLoaded', () => {
     
     function updatePlayerSelectorLabel() {
         if (!playerSelectorLabel) return;
-        if (currentGraphView === 'reports') {
+        if (!currentSelectedPlayer) {
+            playerSelectorLabel.textContent = 'Select Player:';
+        } else if (currentGraphView === 'reports') {
             playerSelectorLabel.textContent = 'Select Player (who received reports):';
         } else if (currentGraphView === 'playerReports') {
             playerSelectorLabel.textContent = 'Select Player (who created reports):';
@@ -2141,6 +2226,7 @@ document.addEventListener('DOMContentLoaded', () => {
         playerSelectorDisplay.innerHTML = '<span class="select-placeholder">Select a player...</span><span class="select-chevron">▼</span>';
         playerSelectorDropdown.classList.add('hidden');
         currentSelectedPlayer = null;
+        isAllPlayersExplicitlySelected = false;
         playerSelectorOptions = [];
         progressBar.style.width = '0%';
 
@@ -2346,7 +2432,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         renderCurrentGraph(matchData[0], null);
                     }
                 } else {
-                    renderTimelineGraph(matchData[0], null);
+                    renderCurrentGraph(matchData[0], null);
                 }
             });
         }
@@ -2856,6 +2942,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function renderCurrentGraph(matchData, playerFilter = null) {
+        updateGraphTabsVisibility();
         const canvas = timelineGraphContainer.querySelector('canvas');
         const title = timelineGraphContainer.querySelector('.graph-title');
         if (canvas) canvas.style.opacity = '0';
@@ -2865,10 +2952,10 @@ document.addEventListener('DOMContentLoaded', () => {
             updatePlayerSelectorLabel();
             if (currentGraphView === 'scoreboard') {
                 renderScoreboardActivityGraph(matchData, playerFilter);
-            } else if (currentGraphView === 'playerReports') {
+            } else if (currentGraphView === 'playerReports' && currentSelectedPlayer) {
                 await renderPlayerReportsGraph(matchData, playerFilter);
             } else {
-                renderTimelineGraph(matchData, playerFilter);
+                await renderTimelineGraph(matchData, playerFilter);
             }
             if (currentSelectedPlayer && playerSelectorOptions.length > 0) {
                 const option = playerSelectorOptions.find(o => o.key === currentSelectedPlayer);
@@ -2894,7 +2981,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function renderTimelineGraph(matchData, playerFilter = null) {
+    async function renderTimelineGraph(matchData, playerFilter = null) {
         if (!matchData || !matchData.reports || matchData.reports.length === 0) {
             const timelineOverlay = timelineGraphContainer.querySelector('#graph-loading-overlay');
             if (timelineOverlay) {
@@ -2988,15 +3075,78 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
+        const cacheKey = String(matchData.matchID);
+        let heroLookupBySlot = new Map();
+        let heroLookupBySteamID = new Map();
+
+        if (heroLookupCache.has(cacheKey)) {
+            const cached = heroLookupCache.get(cacheKey);
+            heroLookupBySlot = cached.heroLookupBySlot;
+            heroLookupBySteamID = cached.heroLookupBySteamID;
+        } else if (matchData.players && Array.isArray(matchData.players) && matchData.players.length > 0) {
+            matchData.players.forEach(p => {
+                if (p.Slot >= 0 && p.Slot < 10 && p.Hero) {
+                    heroLookupBySlot.set(p.Slot, p.Hero);
+                }
+                const steamIDStr = p.SteamID ? String(p.SteamID) : null;
+                if (steamIDStr && steamIDStr !== '0') {
+                    heroLookupBySteamID.set(steamIDStr, p.Hero);
+                }
+            });
+            heroLookupCache.set(cacheKey, { heroLookupBySlot, heroLookupBySteamID });
+        } else {
+            const { heroLookupBySlot: slotLookup, heroLookupBySteamID: steamLookup } = await getPlayerInfo(matchData);
+            heroLookupBySlot = slotLookup;
+            heroLookupBySteamID = steamLookup;
+        }
+
+        reports = reports.map(report => {
+            const updatedReport = { ...report };
+
+            if (!updatedReport.TargetHero || !updatedReport.TargetHero.trim() || updatedReport.TargetHero.toLowerCase() === 'unknown') {
+                let hero = null;
+                if (report.TargetSlot != null && report.TargetSlot >= 0 && report.TargetSlot < 10) {
+                    hero = heroLookupBySlot.get(report.TargetSlot);
+                }
+                if (!hero && report.TargetSteamID) {
+                    hero = heroLookupBySteamID.get(String(report.TargetSteamID));
+                }
+                if (!hero && report.Candidates && report.Candidates.length > 0) {
+                    const selIdx = report.SelectedCandidateIndex || 0;
+                    hero = report.Candidates[selIdx]?.Hero;
+                }
+                if (hero && hero.toLowerCase() !== 'unknown') {
+                    updatedReport.TargetHero = hero;
+                }
+            }
+
+            if (!updatedReport.Hero || !updatedReport.Hero.trim() || updatedReport.Hero.toLowerCase() === 'unknown') {
+                let hero = null;
+                if (report.Slot != null && report.Slot >= 0 && report.Slot < 10) {
+                    hero = heroLookupBySlot.get(report.Slot);
+                }
+                if (!hero && report.SteamID) {
+                    hero = heroLookupBySteamID.get(String(report.SteamID));
+                }
+                if (hero && hero.toLowerCase() !== 'unknown') {
+                    updatedReport.Hero = hero;
+                }
+            }
+
+            return updatedReport;
+        });
+
         if (reports.length === 0) {
-            timelineGraphContainer.innerHTML = '<p style="text-align: center; color: var(--text-secondary); padding: 2rem;">No reports found for the selected player.</p>';
+            const emptyMsg = !playerFilter ? 'No reports found for this match.' : 'No reports found for the selected player.';
+            timelineGraphContainer.innerHTML = `<p style="text-align: center; color: var(--text-secondary); padding: 2rem;">${emptyMsg}</p>`;
             hideGraphLoading();
             return;
         }
 
+        const isAllPlayers = !playerFilter;
         const title = document.createElement('h3');
         title.className = 'graph-title';
-        title.textContent = 'Incoming Reports - Report Timestamps';
+        title.textContent = isAllPlayers ? 'Reports - Report Timestamps' : 'Incoming Reports - Report Timestamps';
         title.style.cssText = 'margin: 0 0 1rem 0; color: var(--text-primary); font-size: 1.25rem; font-weight: 600;';
         
         const canvas = document.createElement('canvas');
@@ -3302,7 +3452,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     ctx.fillStyle = '#f1f5f9';
                     ctx.font = '10px Inter';
                     ctx.textAlign = 'center';
-                    ctx.fillText(heroName ? heroName.substring(0, 3).toUpperCase() : '?', x, y + iconSize / 2 + 3);
+                    const displayName = getHeroDisplayName(heroName);
+                    ctx.fillText(displayName ? displayName.substring(0, 3).toUpperCase() : '?', x, y + iconSize / 2 + 3);
                 }
                 
                 ctx.strokeStyle = team === 'FRIENDLY' ? '#22c55e' : '#ef4444';
@@ -3392,9 +3543,24 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             
             if (hoveredIcon) {
-                const timestamp = hoveredIcon.report.Time;
-                const heroName = hoveredIcon.report.TargetHero || hoveredIcon.report.Hero;
-                tooltip.textContent = `${heroName || 'Unknown'}: ${timestamp}`;
+                if (isAllPlayers) {
+                    let targetHeroRaw = hoveredIcon.report.TargetHero || '';
+                    let reporterHeroRaw = hoveredIcon.report.Hero || '';
+                    let targetHero = getHeroDisplayName(targetHeroRaw);
+                    let reporterHero = getHeroDisplayName(reporterHeroRaw);
+                    if (targetHero === 'Unknown' && hoveredIcon.report.TargetName) {
+                        targetHero = hoveredIcon.report.TargetName;
+                    }
+                    if (reporterHero === 'Unknown' && hoveredIcon.report.Name) {
+                        reporterHero = hoveredIcon.report.Name;
+                    }
+                    tooltip.textContent = `${targetHero} reported by ${reporterHero}`;
+                } else {
+                    const timestamp = hoveredIcon.report.Time;
+                    const heroName = hoveredIcon.report.TargetHero || hoveredIcon.report.Hero;
+                    const displayName = getHeroDisplayName(heroName);
+                    tooltip.textContent = `${displayName}: ${timestamp}`;
+                }
                 tooltip.style.visibility = 'hidden';
                 tooltip.classList.remove('hidden');
                 
@@ -4540,9 +4706,13 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
+    let isAllPlayersExplicitlySelected = false;
+
     function selectPlayerOption(key) {
         console.log(`[FRONTEND] selectPlayerOption called with key: "${key}"`);
         currentSelectedPlayer = key || null;
+        isAllPlayersExplicitlySelected = !key;
+        updateGraphTabsVisibility();
         const option = playerSelectorOptions.find(o => o.key === key);
         
         if (option && analysisSteamID) {
@@ -4617,7 +4787,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 populatePlayerSelector(allMatchData[matchIndex]).then(() => {
                     if (currentSelectedPlayer) {
                         selectPlayerOption(currentSelectedPlayer);
-                    } else if (analysisSteamID) {
+                    } else if (analysisSteamID && !isAllPlayersExplicitlySelected) {
                         const steamIDFilter = `steamid_${analysisSteamID}`;
                         const matchingOption = playerSelectorOptions.find(opt => opt.key === steamIDFilter);
                         if (!matchingOption) {
@@ -4641,7 +4811,7 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     });
     
-    updateGraphViewTabs();
+    updateGraphTabsVisibility();
 
     matchSelector.addEventListener('change', (e) => {
         const index = parseInt(e.target.value);
@@ -4748,7 +4918,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         }
                     }
                 } else {
-                    if (analysisSteamID) {
+                    if (analysisSteamID && !isAllPlayersExplicitlySelected) {
                         const matchingPlayer = playerSelectorOptions.find(opt => opt.steamID && steamIDsMatch(opt.steamID, analysisSteamID));
                         if (matchingPlayer) {
                             console.log('[MatchSelector] Found matching player for analysisSteamID, selecting:', matchingPlayer.key);
