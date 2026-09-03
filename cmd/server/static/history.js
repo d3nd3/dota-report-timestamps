@@ -59,6 +59,53 @@ async function waitForSteamConnection(maxWait = 30000, checkInterval = 1000) {
     return false;
 }
 
+const STEAM_STATUS_LABELS = {
+    0: 'Disconnected',
+    1: 'Connecting',
+    2: 'Need Steam Guard Code',
+    3: 'Connected to Steam',
+    4: 'Dota 2 GC Ready',
+    5: 'Rate Limited'
+};
+
+function formatSteamStatus(data) {
+    const text = data.statusText || STEAM_STATUS_LABELS[data.status] || 'Unknown';
+    const err = data.errorMessage ? ` — ${data.errorMessage}` : '';
+    return `Steam: ${text}${err}`;
+}
+
+async function fetchSteamStatus() {
+    const res = await fetch('/api/steam/status');
+    return res.json();
+}
+
+async function postDownload(matchId, profileName) {
+    const res = await fetch('/api/download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ matchId: parseInt(matchId, 10), profileName: profileName || '' })
+    });
+    let data = {};
+    try {
+        data = await res.json();
+    } catch (_) {
+        data = { error: await res.text().catch(() => res.statusText) };
+    }
+    if (!res.ok) {
+        const err = new Error(data.error || data.message || `HTTP ${res.status}`);
+        err.data = data;
+        throw err;
+    }
+    return data;
+}
+
+function setStatusPill(el, text, className) {
+    if (!el) return;
+    el.textContent = text;
+    el.className = `status-pill ${className}`;
+    el.style.visibility = 'visible';
+}
+
 // History Logic
 document.addEventListener('DOMContentLoaded', () => {
     const historySteamIdInput = document.getElementById('history-steam-id');
@@ -86,6 +133,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     window.getSelectedProfileName = getSelectedProfileName;
+    window.waitForSteamConnection = waitForSteamConnection;
 
     // Load saved Steam ID for history
     const savedHistorySteamId = localStorage.getItem('historySteamId');
@@ -143,8 +191,10 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
         
-        historyResults.innerHTML = '<p class="loading">Fetching match history...</p>';
-        
+        const statusData = await fetchSteamStatus().catch(() => ({}));
+        const gcLabel = statusData.statusText || STEAM_STATUS_LABELS[statusData.status] || 'GC';
+        historyResults.innerHTML = `<p class="loading">Fetching ${limit} matches via GC (${gcLabel})...</p>`;
+
         const turboParam = turboOnly ? '&turboOnly=true' : '';
         fetchWithRetry(`/api/history?steamId=${steamId}&limit=${limit}${turboParam}`, {}, 3, 1000)
             .then(res => res.json())
@@ -424,19 +474,10 @@ document.addEventListener('DOMContentLoaded', () => {
             };
 
             const profileName = getSelectedProfileName ? getSelectedProfileName() : '';
-            fetchWithRetry('/api/download', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    matchId: parseInt(matchId),
-                    profileName: profileName
-                })
-            }, 3, 2000)
-            .then(res => res.json())
+            postDownload(matchId, profileName)
             .then(data => {
                 eventSource.close();
                 if (progressBar) progressBar.style.width = '100%';
-                
                 return new Promise(resolve => setTimeout(() => resolve(data), 500));
             })
             .then(data => {
@@ -446,46 +487,35 @@ document.addEventListener('DOMContentLoaded', () => {
                         item.classList.add('exists');
                         item.classList.add('added-animation');
                     }
-                    
-                    if (status) {
-                        status.textContent = 'Downloaded';
-                        status.className = 'status-pill status-success';
-                        status.style.visibility = 'visible';
-                    }
-                    
-                    if (window.loadReplays) {
-                        setTimeout(() => window.loadReplays(), 500);
-                    }
-                    if (window.updateHistoryStatus) {
-                        setTimeout(() => window.updateHistoryStatus(), 1000);
-                    }
+                    const via = data.source ? ` (${data.source})` : '';
+                    setStatusPill(status, data.message ? 'Done' : `Downloaded${via}`, 'status-success');
+                    if (status && data.message) status.title = data.message;
+                    if (window.loadReplays) setTimeout(() => window.loadReplays(), 500);
+                    if (window.updateHistoryStatus) setTimeout(() => window.updateHistoryStatus(), 1000);
                     resolve(data);
                 } else if (data.status === 'queued') {
-                    if (status) {
-                        status.textContent = 'Queued';
-                        status.className = 'status-pill status-pending';
-                    }
+                    setStatusPill(status, 'Queued', 'status-pending');
+                    if (status && data.message) status.title = data.message;
                     resolve(data);
                 } else {
-                    if (status) {
-                        status.textContent = 'Failed';
-                        status.className = 'status-pill status-error';
-                    }
-                    reject(new Error(data.message || 'Unknown error'));
+                    const msg = data.error || data.message || 'Failed';
+                    setStatusPill(status, 'Failed', 'status-error');
+                    if (status) status.title = msg;
+                    reject(new Error(msg));
                 }
             })
             .catch(err => {
                 eventSource.close();
-                if (status) {
-                    status.textContent = 'Error';
-                    status.className = 'status-pill status-error';
-                }
+                const msg = err.data?.error || err.data?.message || err.message;
+                setStatusPill(status, 'Error', 'status-error');
+                if (status) status.title = msg;
                 reject(err);
             })
             .finally(() => {
                 if (btn) {
                     btn.disabled = false;
-                    btn.textContent = 'Redownload';
+                    const resetLabel = btn.id === 'download-match-btn' ? 'Download Replay' : 'Redownload';
+                    btn.textContent = resetLabel;
                     btn.style.display = 'inline-block';
                 }
                 if (progressContainer) progressContainer.classList.add('hidden');
@@ -506,7 +536,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (data && data.status === 'queued') {
                     alert(`Match ${matchId} queued for parsing. It will be downloaded automatically in the background.`);
                 } else if (data && !data.success) {
-                    alert('Download failed: ' + (data.message || 'Unknown error'));
+                    alert('Download failed: ' + (data.message || data.error || 'Unknown error'));
                 }
             })
             .catch(err => {
@@ -514,6 +544,101 @@ document.addEventListener('DOMContentLoaded', () => {
                 alert('Error downloading: ' + err.message);
             });
     }
+
+    window.downloadReplayPromise = downloadReplayPromise;
+    window.updateDownloadMatchSteamHint = updateDownloadMatchSteamHint;
+
+    function updateDownloadMatchSteamHint() {
+        const hint = document.getElementById('download-match-steam-hint');
+        const btn = document.getElementById('download-match-btn');
+        if (!hint) return;
+        fetchSteamStatus()
+            .then(data => {
+                const ready = data.status === 3 || data.status === 4;
+                hint.textContent = formatSteamStatus(data) + (ready ? ' — ready to download' : ' — connect in Settings first');
+                hint.style.color = ready ? '#22c55e' : (data.status === 1 ? '#ff9800' : '#94a3b8');
+                if (btn) btn.disabled = data.status === 1;
+            })
+            .catch(() => {
+                hint.textContent = 'Steam: status unavailable';
+                hint.style.color = '#ef4444';
+            });
+    }
+
+    function setupDownloadByMatchId() {
+        const input = document.getElementById('download-match-id');
+        const btn = document.getElementById('download-match-btn');
+        const statusArea = document.getElementById('download-match-status-area');
+        if (!input || !btn || !statusArea) return;
+
+        updateDownloadMatchSteamHint();
+        setInterval(updateDownloadMatchSteamHint, 3000);
+
+        async function runDownload() {
+            const matchId = input.value.trim();
+            if (!matchId || !/^\d+$/.test(matchId)) {
+                statusArea.innerHTML = '<p style="color:#ef4444">Enter a valid numeric match ID.</p>';
+                return;
+            }
+            btn.disabled = true;
+            btn.textContent = 'Checking Steam...';
+            statusArea.innerHTML = '<p class="loading">Waiting for Dota 2 GC Ready...</p>';
+
+            const steamReady = await waitForSteamConnection(60000);
+            if (!steamReady) {
+                btn.disabled = false;
+                btn.textContent = 'Download Replay';
+                statusArea.innerHTML = '<p style="color:#ef4444">Steam not ready. Open Settings, connect, and wait for Dota 2 GC Ready.</p>';
+                updateDownloadMatchSteamHint();
+                return;
+            }
+            updateDownloadMatchSteamHint();
+
+            statusArea.innerHTML = `
+                <div class="match-actions" style="display: flex; flex-direction: column; gap: 8px;">
+                    <span class="status-pill status-downloading" id="status-${matchId}" style="text-align: center;">Starting...</span>
+                    <div class="progress-container" id="progress-container-${matchId}" style="height: 6px; background: #334155; border-radius: 3px;">
+                        <div class="progress-bar" id="progress-${matchId}" style="width: 0%; height: 100%; background: #22c55e; border-radius: 3px; transition: width 0.2s;"></div>
+                    </div>
+                </div>`;
+            btn.textContent = 'Downloading...';
+
+            downloadReplayPromise(matchId, btn)
+                .then(data => {
+                    const pill = document.getElementById(`status-${matchId}`);
+                    if (data && data.status === 'queued') {
+                        setStatusPill(pill, 'Queued', 'status-pending');
+                        statusArea.insertAdjacentHTML('beforeend',
+                            `<p style="color:#94a3b8;font-size:0.85em;margin-top:8px">${data.message || 'Queued for background download'}</p>`);
+                    } else if (data && data.success) {
+                        setStatusPill(pill, 'Downloaded', 'status-success');
+                        statusArea.insertAdjacentHTML('beforeend',
+                            `<p style="color:#22c55e;font-size:0.85em;margin-top:8px">${data.message || 'Complete'}</p>`);
+                        input.value = '';
+                        if (window.loadReplays) setTimeout(() => window.loadReplays(), 500);
+                    }
+                })
+                .catch(err => {
+                    const msg = err.data?.error || err.data?.message || err.message;
+                    const pill = document.getElementById(`status-${matchId}`);
+                    setStatusPill(pill, 'Failed', 'status-error');
+                    statusArea.insertAdjacentHTML('beforeend',
+                        `<p style="color:#ef4444;font-size:0.85em;margin-top:8px">${msg}</p>`);
+                })
+                .finally(() => {
+                    btn.disabled = false;
+                    btn.textContent = 'Download Replay';
+                    updateDownloadMatchSteamHint();
+                });
+        }
+
+        btn.addEventListener('click', runDownload);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') runDownload();
+        });
+    }
+
+    setupDownloadByMatchId();
 
     // Fatal search functionality
     const fatalSteamIdInput = document.getElementById('fatal-steam-id');

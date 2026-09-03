@@ -141,7 +141,6 @@ func handleSteamLogin(w http.ResponseWriter, r *http.Request) {
 	if req.Password != "" {
 		config.SteamPass = req.Password
 	}
-
 	// Always try to ensure bot is initialized if we have creds
 	if config.SteamUser == "" || config.SteamPass == "" {
 		http.Error(w, "Username and Password required", http.StatusBadRequest)
@@ -1701,10 +1700,10 @@ func handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Using GC for steamID: %d, limit: %d, turboOnly: %v", steamID, limit, turboOnly)
+	log.Printf("[HISTORY] Using GC: steamID=%d limit=%d turboOnly=%v gcStatus=%d", steamID, limit, turboOnly, status)
 	matches, err := gcClient.GetPlayerMatchHistory(steamID, limit, turboOnly)
 	if err != nil {
-		log.Printf("Error fetching matches from GC: %v", err)
+		log.Printf("[HISTORY] steamID=%d failed: %v", steamID, err)
 		http.Error(w, fmt.Sprintf("Error fetching matches: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -1814,6 +1813,40 @@ type DownloadRequest struct {
 	AdditionalMatchIDs []int64 `json:"additionalMatchIds,omitempty"` // List of additional match IDs to download (pre-calculated)
 }
 
+func gcStatusLabel(status botclient.ConnectionStatus) string {
+	switch status {
+	case botclient.StatusConnecting:
+		return "Connecting"
+	case botclient.StatusNeedGuardCode:
+		return "Need Steam Guard Code"
+	case botclient.StatusConnected:
+		return "Connected to Steam"
+	case botclient.StatusGCReady:
+		return "Dota 2 GC Ready"
+	case botclient.StatusRateLimited:
+		return "Rate Limited"
+	default:
+		return "Disconnected"
+	}
+}
+
+func currentGCStatus() (botclient.ConnectionStatus, string) {
+	if gcClient == nil {
+		return botclient.StatusDisconnected, gcStatusLabel(botclient.StatusDisconnected)
+	}
+	s := gcClient.GetStatus()
+	return s, gcStatusLabel(s)
+}
+
+func writeDownloadJSON(w http.ResponseWriter, code int, payload map[string]interface{}) {
+	gcStatus, gcText := currentGCStatus()
+	payload["gcStatus"] = int(gcStatus)
+	payload["gcStatusText"] = gcText
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(payload)
+}
+
 func handleDownload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1822,11 +1855,13 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 
 	var req DownloadRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("[DOWNLOAD] Error decoding request: %v", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	if req.MatchID == 0 {
+		log.Printf("[DOWNLOAD] Invalid request: matchID=0")
 		http.Error(w, "Invalid match ID", http.StatusBadRequest)
 		return
 	}
@@ -1838,13 +1873,17 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 	if gamesPerFatal > 15 {
 		gamesPerFatal = 15 // Cap at 15
 	}
-	
+
+	gcStatus, gcText := currentGCStatus()
+	log.Printf("[DOWNLOAD] Received request: matchID=%d profile=%q fatal=%v gamesPerFatal=%d steamID=%d gcStatus=%d (%s)",
+		req.MatchID, req.ProfileName, req.Fatal, gamesPerFatal, req.SteamID, gcStatus, gcText)
+
 	lockInterface, _ := handlerLocks.LoadOrStore(req.MatchID, &sync.Mutex{})
 	handlerLock := lockInterface.(*sync.Mutex)
 	handlerLock.Lock()
 	defer handlerLock.Unlock()
-	
-	log.Printf("Starting download process for match %d (profile: %s, fatal: %v, gamesPerFatal: %d)", req.MatchID, req.ProfileName, req.Fatal, gamesPerFatal)
+
+	log.Printf("[DOWNLOAD] matchID=%d acquired lock, starting (profile=%q fatal=%v)", req.MatchID, req.ProfileName, req.Fatal)
 
 	var replayDir string
 	if req.Fatal {
@@ -1858,7 +1897,9 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 	} else {
 		replayDir = getProfileReplayDir(req.ProfileName)
 	}
+	log.Printf("[DOWNLOAD] matchID=%d replayDir=%s", req.MatchID, replayDir)
 	if err := os.MkdirAll(replayDir, os.ModePerm); err != nil {
+		log.Printf("[DOWNLOAD] matchID=%d failed to create replayDir: %v", req.MatchID, err)
 		http.Error(w, fmt.Sprintf("Failed to create profile directory: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -2220,44 +2261,53 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := downloader.DownloadReplay(req.MatchID, replayDir, config.StratzAPIToken, config.SteamAPIKey, gcClient); err != nil {
-		// Check if match was queued for parsing (background processing)
+	// Direct match downloads: GC / Steam API / Stratz only (no OpenDota)
+	log.Printf("[DOWNLOAD] matchID=%d mode=gc_only (no OpenDota)", req.MatchID)
+	source, err := downloader.DownloadReplayEx(req.MatchID, replayDir, config.StratzAPIToken, config.SteamAPIKey, gcClient, false)
+	if err != nil {
 		if strings.Contains(err.Error(), "queued for parsing") {
-			log.Printf("Match %d queued for parsing, will be processed in background", req.MatchID)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusAccepted)
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			log.Printf("[DOWNLOAD] matchID=%d queued for parsing (background)", req.MatchID)
+			writeDownloadJSON(w, http.StatusAccepted, map[string]interface{}{
 				"success": false,
 				"status":  "queued",
+				"source":  source,
 				"message": fmt.Sprintf("Match %d queued for parsing, will be downloaded automatically when ready", req.MatchID),
 			})
 			return
 		}
-		log.Printf("Error downloading replay for match %d: %v", req.MatchID, err)
-		http.Error(w, fmt.Sprintf("Error downloading replay: %v", err), http.StatusInternalServerError)
+		log.Printf("[DOWNLOAD] matchID=%d failed: %v (source=%s)", req.MatchID, err, source)
+		errorMsg := err.Error()
+		if strings.Contains(errorMsg, "replay has likely expired") || strings.Contains(errorMsg, "replay not found (404)") {
+			errorMsg = "Replay has expired (7-14 day limit). The replay is no longer available on Valve's servers."
+		}
+		writeDownloadJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"success": false,
+			"status":  "failed",
+			"source":  source,
+			"error":   errorMsg,
+		})
 		return
 	}
 
-	// Verify file actually exists before returning success
 	filePath := filepath.Join(replayDir, fmt.Sprintf("%d.dem", req.MatchID))
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		log.Printf("Match %d download reported success but file not found, may be queued", req.MatchID)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		log.Printf("[DOWNLOAD] matchID=%d finished but file missing at %s", req.MatchID, filePath)
+		writeDownloadJSON(w, http.StatusAccepted, map[string]interface{}{
 			"success": false,
 			"status":  "queued",
+			"source":  source,
 			"message": fmt.Sprintf("Match %d queued for parsing, will be downloaded automatically when ready", req.MatchID),
 		})
 		return
 	}
 
-	log.Printf("Successfully downloaded replay for match %d", req.MatchID)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"message": fmt.Sprintf("Replay downloaded successfully: %d.dem", req.MatchID),
+	log.Printf("[DOWNLOAD] matchID=%d success: %s (source=%s)", req.MatchID, filePath, source)
+	writeDownloadJSON(w, http.StatusOK, map[string]interface{}{
+		"success":   true,
+		"status":    "complete",
+		"source":    source,
+		"replayDir": replayDir,
+		"message":   fmt.Sprintf("Replay downloaded: %d.dem via %s", req.MatchID, source),
 	})
 }
 

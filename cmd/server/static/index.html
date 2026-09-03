@@ -130,6 +130,23 @@
                     </section>
 
                     <div class="browse-sidebar">
+                        <section id="download-match-section" class="card">
+                            <div class="card-header">
+                                <h2>Download Match</h2>
+                            </div>
+                            <div class="card-body">
+                                <div class="input-group">
+                                    <label for="download-match-id">Match ID</label>
+                                    <input type="text" id="download-match-id" placeholder="e.g. 8123456789" inputmode="numeric" pattern="[0-9]*">
+                                </div>
+                                <button id="download-match-btn" class="btn primary-btn">Download Replay</button>
+                                <p id="download-match-steam-hint" class="status-text" style="color: var(--text-secondary); font-size: 0.85em; margin-top: 10px;">
+                                    Steam: checking...
+                                </p>
+                                <div id="download-match-status-area" style="margin-top: 12px;"></div>
+                            </div>
+                        </section>
+
                         <section id="history-section" class="card">
                             <div class="card-header">
                                 <h2>Match History</h2>

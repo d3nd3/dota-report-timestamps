@@ -36,6 +36,8 @@ I am very interested to see what other people learn! 🧐 This tool helps you ef
 **That's it!** No need to install Go, Git, or anything else. The tool is ready to use.
 
 > **Note**: Keep the launcher window open while using the tool. To stop it, press Ctrl+C in that window.
+>
+> **Important for pre-built versions**: Whenever Valve releases a major Dota 2 patch, replay formats may change. If match parsing starts failing, download the latest version from the [Releases page](https://github.com/d3nd3/dota-report-timestamps/releases).
 
 ### 📁 Understanding the Replay Directory Structure
 
@@ -54,6 +56,23 @@ When you first open the tool, you'll need to configure the **Replay Directory**.
 3. **Current Path Display**: The file browser on the right shows the full path it's currently browsing, including the base directory and any selected profile subdirectory.
 
 **Tip**: You can organize replays by profile by creating subdirectories in your replays folder. The tool will automatically detect and browse them when you select the corresponding profile.
+
+---
+
+## 🔄 Keeping the Parser Up to Date (After Dota 2 Patches)
+
+Dota 2 updates frequently alter entity classes, network tables, and protobuf schemas in replays.
+
+*   **Go does NOT automatically update dependencies like `manta` on build.**
+*   If you built from source and Dota 2 releases a patch that causes replays to fail to parse, update the repository and the parser using:
+
+```bash
+git pull
+./run.sh --update
+```
+*(Or `./launch-linux.sh --update` on Linux)*
+
+This command pulls the newest upstream parser updates (`github.com/dotabuff/manta`), resyncs the `vendor/` directory, and recompiles the binaries without breaking Steam GC authentication.
 
 ---
 

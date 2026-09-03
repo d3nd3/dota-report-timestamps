@@ -138,43 +138,47 @@ func formatDuration(d time.Duration) string {
 }
 
 func isReportButton(x int, y int, aspect float32) int {
-	// width of their scoreboard in 1920 pixels, based on thier custom resolution,aspectRatio.
-	score_width := int(math.Round(float64((1.77777777778 * (920.0 / 1920)) / float64(aspect) * 1920)))
-	score_width_no_tips := int(math.Round(float64((1.77777777778 * (820.0 / 1920)) / float64(aspect) * 1920)))
+    // Width of their scoreboard in 1920 pixels, based on their custom resolution, aspectRatio.
+    score_width := int(math.Round(float64((1.77777777778 * (920.0 / 1920)) / float64(aspect) * 1920)))
+    score_width_no_tips := int(math.Round(float64((1.77777777778 * (820.0 / 1920)) / float64(aspect) * 1920)))
 
-	lower_x_bound := 866.0
-	upper_x_bound := 893.0
+	// 6 good mb
+    padding := 6
+    paddingFloat := float64(padding)
 
-	lower_x_bound_r := lower_x_bound / 920
-	upper_x_bound_r := upper_x_bound / 920
+    lower_x_bound := 866.0 - paddingFloat
+    upper_x_bound := 893.0 + paddingFloat
 
-	lower_x_bound_no_tips_r := (lower_x_bound - 100) / 820
-	upper_x_bound_no_tips_r := (upper_x_bound - 100) / 820
+    lower_x_bound_r := lower_x_bound / 920
+    upper_x_bound_r := upper_x_bound / 920
 
-	if (x >= int(math.Floor(float64(lower_x_bound_no_tips_r*float64(score_width_no_tips)))) && x <= int(math.Ceil(float64(upper_x_bound_no_tips_r*float64(score_width_no_tips))))) || (x >= int(math.Floor(float64(lower_x_bound_r*float64(score_width)))) && x <= int(math.Ceil(float64(upper_x_bound_r*float64(score_width))))) /*|| ( x >= 658 && x <= 679 )*/ {
-		if y >= 106 && y <= 135 {
-			return 0
-		} else if y >= 176 && y <= 205 {
-			return 1
-		} else if y >= 246 && y <= 275 {
-			return 2
-		} else if y >= 316 && y <= 345 {
-			return 3
-		} else if y >= 386 && y <= 415 {
-			return 4
-		} else if y >= 488 && y <= 517 {
-			return 5
-		} else if y >= 558 && y <= 587 {
-			return 6
-		} else if y >= 628 && y <= 657 {
-			return 7
-		} else if y >= 698 && y <= 727 {
-			return 8
-		} else if y >= 768 && y <= 797 {
-			return 9
-		}
-	}
-	return -1
+    lower_x_bound_no_tips_r := (lower_x_bound - 100) / 820
+    upper_x_bound_no_tips_r := (upper_x_bound - 100) / 820
+
+    if (x >= int(math.Floor(float64(lower_x_bound_no_tips_r*float64(score_width_no_tips)))) && x <= int(math.Ceil(float64(upper_x_bound_no_tips_r*float64(score_width_no_tips))))) || (x >= int(math.Floor(float64(lower_x_bound_r*float64(score_width)))) && x <= int(math.Ceil(float64(upper_x_bound_r*float64(score_width))))) {
+        if y >= 106-padding && y <= 135+padding {
+            return 0
+        } else if y >= 176-padding && y <= 205+padding {
+            return 1
+        } else if y >= 246-padding && y <= 275+padding {
+            return 2
+        } else if y >= 316-padding && y <= 345+padding {
+            return 3
+        } else if y >= 386-padding && y <= 415+padding {
+            return 4
+        } else if y >= 488-padding && y <= 517+padding {
+            return 5
+        } else if y >= 558-padding && y <= 587+padding {
+            return 6
+        } else if y >= 628-padding && y <= 657+padding {
+            return 7
+        } else if y >= 698-padding && y <= 727+padding {
+            return 8
+        } else if y >= 768-padding && y <= 797+padding {
+            return 9
+        }
+    }
+    return -1
 }
 
 func ExtractPlayerInfo(matchID int64, file io.Reader) ([]PlayerResource, error) {
@@ -385,13 +389,15 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 
 	var current_tick int = 0
 	var begin_tick int = 0
-	const minHoverDuration = 3                           // Minimum hover duration in ticks for a session to be considered valid
-	const validReportWindowSeconds = 4                   // Maximum time window in seconds for a valid report (converted to ticks: 4s * 30 ticks/sec = 120 ticks)
+	const minHoverDuration = 1                           // Minimum hover duration in ticks for a session to be considered valid
+	const validReportWindowSeconds = 4                   // Maximum time window in seconds between reportCircle and confirmButton
 	const durationWeight = 0.7                           // Weight for duration in report attribution scoring
 	const recencyWeight = 0.3                            // Weight for recency in report attribution scoring
 	const ticksPerSecond = 30                            // Game tick rate (ticks per second)
+	const scoreboardGracePeriodTicks = 11               // 300ms grace period after scoreboard closes (300ms * 30 ticks/sec = 9 ticks)
 	scoreboardOpenStartTick := make(map[uint64]int)      // steamid -> tick when scoreboard opened
 	scoreboardTimeRanges := make(map[uint64][]TimeRange) // steamid -> list of time ranges
+	lastScoreboardOpenTick := make(map[uint64]int)       // steamid -> tick when scoreboard was last open
 
 	var reportedTeam int = 2
 	var pausedTicks int = 0
@@ -582,6 +588,7 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 				if name, ok3 := e.GetString("m_iszPlayerName"); ok3 {
 					if statsPanel, ok := e.GetInt32("m_iStatsPanel"); ok {
 						if statsPanel == 1 {
+							lastScoreboardOpenTick[steamid] = current_tick
 							if _, exists := scoreboardOpenStartTick[steamid]; !exists {
 								scoreboardOpenStartTick[steamid] = current_tick
 							}
@@ -634,9 +641,21 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 												hoverSessionDurations[i] = make(map[int][]int)
 											}
 
-											// Track hover sessions (only when scoreboard is open)
-											if statsPanelOk && statsPanel == 1 {
+											// Track hover sessions (when scoreboard is open or within 300ms grace period after closing)
+											isScoreboardOpen := statsPanelOk && statsPanel == 1
+											if !isScoreboardOpen {
+												if lastOpenTick, exists := lastScoreboardOpenTick[steamid]; exists {
+													if current_tick-lastOpenTick <= scoreboardGracePeriodTicks {
+														isScoreboardOpen = true
+													}
+												}
+											}
+
+											if isScoreboardOpen {
+												// scoreboard is open
+												fmt.Printf("[PARSER] DEBUG: Slot %d - scoreboard open at tick %d\n", i, current_tick)
 												if targetSlot != -1 && targetSlot != i {
+													fmt.Printf("[PARSER] DEBUG: Slot %d - hovering over target slot %d at tick %d\n", i, targetSlot, current_tick)
 													// End any active sessions for other targets (switching targets)
 													for tSlot, sessionStart := range hoverSessionStart[i] {
 														if tSlot != targetSlot && sessionStart > 0 {
@@ -661,6 +680,7 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 													if _, hasActiveSession := hoverSessionStart[i][targetSlot]; !hasActiveSession {
 														// Start new session
 														hoverSessionStart[i][targetSlot] = current_tick
+														fmt.Printf("[PARSER] DEBUG: Slot %d - new hover session started for target slot %d at tick %d\n", i, targetSlot, current_tick)
 													}
 													lastHoverTime[i] = current_tick
 													targetLastHoverTime[i][targetSlot] = current_tick
@@ -697,6 +717,7 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 																hoverDurations[i][tSlot] = sessionDuration
 															}
 															if sessionDuration >= minHoverDuration {
+																fmt.Printf("[PARSER] DEBUG: Slot %d - valid hover session ended at tick %d (duration: %d ticks)\n", tSlot, current_tick, sessionDuration)
 																targetLastValidHoverTime[i][tSlot] = current_tick
 																if _, exists := targetFirstValidHoverTime[i][tSlot]; !exists {
 																	targetFirstValidHoverTime[i][tSlot] = current_tick
@@ -721,11 +742,13 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 													if sessionStart > 0 {
 														sessionDuration := current_tick - sessionStart
 														if sessionDuration > 0 {
+															fmt.Printf("[PARSER] DEBUG: Slot %d - confirm box hover detected, finalizing session (duration: %d ticks)\n", tSlot, sessionDuration)
 															hoverSessionDurations[i][tSlot] = append(hoverSessionDurations[i][tSlot], sessionDuration)
 															if sessionDuration > hoverDurations[i][tSlot] {
 																hoverDurations[i][tSlot] = sessionDuration
 															}
 															if sessionDuration >= minHoverDuration {
+																fmt.Printf("[PARSER] DEBUG: Slot %d - valid hover session ended at tick %d (duration: %d ticks)\n", tSlot, current_tick, sessionDuration)
 																targetLastValidHoverTime[i][tSlot] = current_tick
 																if _, exists := targetFirstValidHoverTime[i][tSlot]; !exists {
 																	targetFirstValidHoverTime[i][tSlot] = current_tick
@@ -736,11 +759,9 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 													}
 												}
 											} else {
-												// Cursor left confirm box - check if report should be created
-												// At this point, all hover sessions have been finalized, so we can now determine
-												// which slot was hovered "most recently" by finding the maximum targetLastValidHoverTime value.
-												// Only one slot can be the "most recent" - the one with the highest timestamp.
+												// Cursor is not in confirmBox
 												if startTick, exists := confirmBoxHoverStart[i]; exists {
+													// Cursor was in confirmBox but now is not.
 													confirmBoxHoverDuration := current_tick - startTick
 													minutes, secs := ticksToMinutesAndSeconds(begin_tick, pausedTicks, current_tick)
 													timestamp := fmt.Sprintf("%02d:%02d", minutes, secs)
@@ -752,6 +773,7 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 													for tSlot := range hoverDurations[i] {
 														if tSlot == 6 || tSlot == 7 || tSlot == 8 {
 															hasOverlappingSlots = true
+															fmt.Printf("[PARSER] DEBUG: Overlapping slot detected: %d\n", tSlot)
 															break
 														}
 													}
@@ -822,11 +844,19 @@ func ParseReplay(matchID int64, file io.Reader, reportedSlot int, reportedSteamI
 													}
 
 													hasNonOverlappingSlots := mostRecentLastHoverTime >= 0
-
+													if hasOverlappingSlots {
+														fmt.Printf("[PARSER] DEBUG: Earliest first hover time: %d (Slot %d)\n", earliestFirstHoverTime, earliestFirstHoverSlot)
+													}
+													if hasNonOverlappingSlots {
+														fmt.Printf("[PARSER] DEBUG: Most recent last hover time: %d (Slot %d)\n", mostRecentLastHoverTime, mostRecentLastHoverSlot)
+													}
 													// Only create report if hover duration was sufficient and there's been a valid hover session recently
 													// Note: We don't pre-check validReference here - each candidate is validated individually
 													// during scoring, and if no valid candidates exist, bestTarget will remain -1
 													if confirmBoxHoverDuration >= minHoverDuration && (hasOverlappingSlots || hasNonOverlappingSlots) {
+
+														fmt.Printf("[PARSER] ConfirmBoxHover Confirmed!")
+
 														bestTarget := -1
 														maxScore := 0.0
 

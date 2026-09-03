@@ -244,65 +244,109 @@ func constructReplayURLs(cluster uint32, matchID int64, salt uint64) []string {
 }
 
 // DownloadReplay downloads a replay for the given match ID to the specified directory.
-// It tries to fetch the replay URL using Stratz (if a token is provided) or falls back to OpenDota.
 func DownloadReplay(matchID int64, replayDir string, stratzToken string, steamAPIKey string, gcClient *botclient.Client) error {
+	_, err := DownloadReplayEx(matchID, replayDir, stratzToken, steamAPIKey, gcClient, true)
+	return err
+}
+
+// DownloadReplayEx downloads a replay. When allowOpenDota is false, only GC / Steam API / Stratz are used.
+// Returns the replay URL source (e.g. dota2_gc, steam_webapi) and any error.
+func DownloadReplayEx(matchID int64, replayDir string, stratzToken string, steamAPIKey string, gcClient *botclient.Client, allowOpenDota bool) (string, error) {
+	log.Printf("[DOWNLOAD] matchID=%d replayDir=%s allowOpenDota=%v", matchID, replayDir, allowOpenDota)
+
 	demFilePath := filepath.Join(replayDir, fmt.Sprintf("%d.dem", matchID))
 	if _, err := os.Stat(demFilePath); err == nil {
-		log.Printf("Replay file already exists for match %d, skipping download", matchID)
-		return nil
+		log.Printf("[DOWNLOAD] matchID=%d already exists at %s, skipping", matchID, demFilePath)
+		return "existing", nil
 	}
 
 	var replayURLs []string
-	// var err error // Removed this declaration to use the one from the loop/calls properly
+	source := ""
 
-	// 0. Try Dota 2 GC Client (Highest Priority, Direct Access)
 	status := botclient.StatusDisconnected
 	if gcClient != nil {
 		status = gcClient.GetStatus()
 	}
+	log.Printf("[DOWNLOAD] matchID=%d initial GC status=%d", matchID, status)
 
+	// Wait for GC when not using OpenDota fallback
+	if gcClient != nil && !allowOpenDota {
+		deadline := time.Now().Add(30 * time.Second)
+		for time.Now().Before(deadline) {
+			status = gcClient.GetStatus()
+			if status == botclient.StatusGCReady || status == botclient.StatusConnected {
+				log.Printf("[DOWNLOAD] matchID=%d GC ready (status=%d)", matchID, status)
+				break
+			}
+			if status == botclient.StatusNeedGuardCode {
+				return "", fmt.Errorf("steam guard code required: open Settings, enter your Steam Guard code, then retry")
+			}
+			if status == botclient.StatusRateLimited {
+				return "", fmt.Errorf("steam login rate limited: wait 24 hours before retrying")
+			}
+			if status == botclient.StatusDisconnected {
+				return "", fmt.Errorf("steam not connected: open Settings, connect to Steam, and wait for Dota 2 GC Ready")
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		status = gcClient.GetStatus()
+	}
+
+	// 0. Try Dota 2 GC Client (highest priority)
 	if gcClient != nil && (status == botclient.StatusGCReady || status == botclient.StatusConnected) {
-		log.Printf("Attempting to get replay URL from Dota 2 GC for match %d (Status: %d)...", matchID, status)
+		log.Printf("[DOWNLOAD] matchID=%d fetching replay info via Dota 2 GC (status=%d)", matchID, status)
 		cluster, salt, err := gcClient.GetReplayInfo(uint64(matchID))
 		if err == nil && cluster > 0 && salt > 0 {
 			replayURLs = constructReplayURLs(cluster, matchID, salt)
-			log.Printf("Found replay URL via Dota 2 GC: %s (and %d alternates)", replayURLs[0], len(replayURLs)-1)
+			source = "dota2_gc"
+			log.Printf("[DOWNLOAD] matchID=%d source=dota2_gc cluster=%d urls=%d primary=%s", matchID, cluster, len(replayURLs), replayURLs[0])
 		} else {
-			log.Printf("Dota 2 GC failed: %v. Falling back to other methods.", err)
+			log.Printf("[DOWNLOAD] matchID=%d Dota 2 GC failed: %v", matchID, err)
 		}
 	} else if gcClient != nil {
-		log.Printf("Skipping Dota 2 GC: Status is %d (Expected %d - GCReady/Connected). Bot might be connecting or stuck.", status, botclient.StatusGCReady)
+		log.Printf("[DOWNLOAD] matchID=%d skipping GC (status=%d, need GCReady/Connected)", matchID, status)
+		if !allowOpenDota {
+			if status == botclient.StatusConnecting {
+				return "", fmt.Errorf("steam still connecting: wait for Dota 2 GC Ready, then retry")
+			}
+			return "", fmt.Errorf("dota 2 GC not ready (status %d): connect to Steam in Settings first", status)
+		}
 	}
 
-	// 1. Try Steam WebAPI first if key is available (Most reliable/authoritative)
+	// 1. Try Steam WebAPI if key is available
 	if len(replayURLs) == 0 && steamAPIKey != "" {
-		log.Printf("Attempting to get replay URL from Steam WebAPI for match %d...", matchID)
+		log.Printf("[DOWNLOAD] matchID=%d fetching replay info via Steam WebAPI", matchID)
 		steamClient := steamapi.NewClient(steamAPIKey)
 		clusterID, replaySalt, err := steamClient.GetReplayInfo(matchID)
 		if err != nil {
-			log.Printf("Failed to get replay URL from Steam WebAPI: %v. Falling back to Stratz.", err)
+			log.Printf("[DOWNLOAD] matchID=%d Steam WebAPI failed: %v", matchID, err)
 		} else if clusterID > 0 && replaySalt > 0 {
 			replayURLs = constructReplayURLs(uint32(clusterID), matchID, uint64(replaySalt))
-			log.Printf("Found replay URL via Steam WebAPI: %s", replayURLs[0])
+			source = "steam_webapi"
+			log.Printf("[DOWNLOAD] matchID=%d source=steam_webapi cluster=%d url=%s", matchID, clusterID, replayURLs[0])
 		}
 	}
 
-	// 2. Try Stratz if Steam failed or no key
-	// Note: Stratz does not host replays - it only provides cluster/salt to construct Valve CDN URLs
+	// 2. Try Stratz
 	if len(replayURLs) == 0 && stratzToken != "" {
-		log.Printf("Attempting to get replay URLs from Stratz for match %d...", matchID)
+		log.Printf("[DOWNLOAD] matchID=%d fetching replay info via Stratz", matchID)
 		stratzURLs, err := getReplayURLsFromStratz(matchID, stratzToken)
 		if err != nil {
-			log.Printf("Failed to get replay URLs from Stratz: %v. Falling back to OpenDota.", err)
+			log.Printf("[DOWNLOAD] matchID=%d Stratz failed: %v", matchID, err)
 		} else if len(stratzURLs) > 0 {
 			replayURLs = stratzURLs
-			log.Printf("Found %d replay URLs via Stratz (cluster/salt): %s (and %d alternates)", len(stratzURLs), stratzURLs[0], len(stratzURLs)-1)
+			source = "stratz"
+			log.Printf("[DOWNLOAD] matchID=%d source=stratz urls=%d primary=%s", matchID, len(stratzURLs), stratzURLs[0])
 		}
 	}
 
-	// 3. Fallback to OpenDota if previous methods failed
+	// 3. Fallback to OpenDota if allowed
+	if len(replayURLs) == 0 && !allowOpenDota {
+		log.Printf("[DOWNLOAD] matchID=%d no replay URL (GC-only mode, no OpenDota)", matchID)
+		return "", fmt.Errorf("could not get replay URL for match %d (connect to Steam for GC, or add a Steam API key in Settings)", matchID)
+	}
 	if len(replayURLs) == 0 {
-		log.Printf("Attempting to get replay URL from OpenDota for match %d...", matchID)
+		log.Printf("[DOWNLOAD] matchID=%d fetching replay info via OpenDota", matchID)
 
 		// First check if match is parsed using has_parsed field (most reliable)
 		hasParsed, err := checkOpenDotaParsed(matchID)
@@ -321,9 +365,9 @@ func DownloadReplay(matchID int64, replayDir string, stratzToken string, steamAP
 					requestedAt: time.Now(),
 				}
 				pendingMu.Unlock()
-				return fmt.Errorf("match %d queued for retry (OpenDota temporarily unavailable)", matchID)
+				return "", fmt.Errorf("match %d queued for retry (OpenDota temporarily unavailable)", matchID)
 			}
-			return fmt.Errorf("failed to check OpenDota parsed status: %w", err)
+			return "", fmt.Errorf("failed to check OpenDota parsed status: %w", err)
 		}
 
 		if !hasParsed {
@@ -344,9 +388,9 @@ func DownloadReplay(matchID int64, replayDir string, stratzToken string, steamAP
 						requestedAt: time.Now(),
 					}
 					pendingMu.Unlock()
-					return fmt.Errorf("match %d queued for retry (OpenDota temporarily unavailable)", matchID)
+					return "", fmt.Errorf("match %d queued for retry (OpenDota temporarily unavailable)", matchID)
 				}
-				return fmt.Errorf("failed to request parsing: %w", err)
+				return "", fmt.Errorf("failed to request parsing: %w", err)
 			}
 			log.Printf("Parsing requested for match %d (Job ID: %d), queueing for background processing...", matchID, jobID)
 
@@ -363,7 +407,7 @@ func DownloadReplay(matchID int64, replayDir string, stratzToken string, steamAP
 			}
 			pendingMu.Unlock()
 
-			return fmt.Errorf("match %d queued for parsing, will be processed in background", matchID)
+			return "", fmt.Errorf("match %d queued for parsing, will be processed in background", matchID)
 		}
 
 		// Now fetch the replay URL (should be available if parsed)
@@ -384,26 +428,32 @@ func DownloadReplay(matchID int64, replayDir string, stratzToken string, steamAP
 					requestedAt: time.Now(),
 				}
 				pendingMu.Unlock()
-				return fmt.Errorf("match %d queued for retry (OpenDota temporarily unavailable)", matchID)
+				return "", fmt.Errorf("match %d queued for retry (OpenDota temporarily unavailable)", matchID)
 			}
-			return fmt.Errorf("failed to get replay URL from OpenDota: %w", err)
+			return "", fmt.Errorf("failed to get replay URL from OpenDota: %w", err)
 		}
 		if odURL == "" {
-			return fmt.Errorf("replay URL is missing for match %d (may have expired)", matchID)
+			return "", fmt.Errorf("replay URL is missing for match %d (may have expired)", matchID)
 		}
-		
-		// Try to extract cluster/salt from OpenDota's URL to generate alternative CDN URLs
+
 		if cluster, salt, ok := extractClusterSaltFromURL(odURL, matchID); ok {
-			log.Printf("Extracted cluster=%d, salt=%d from OpenDota URL, generating CDN alternatives", cluster, salt)
+			log.Printf("[DOWNLOAD] matchID=%d OpenDota cluster=%d salt=%d", matchID, cluster, salt)
 			replayURLs = constructReplayURLs(cluster, matchID, salt)
 		} else {
-			// Fallback: use OpenDota's URL as-is (it's still a Valve CDN URL)
-			log.Printf("Could not extract cluster/salt from OpenDota URL, using URL as-is: %s", odURL)
+			log.Printf("[DOWNLOAD] matchID=%d OpenDota raw URL: %s", matchID, odURL)
 			replayURLs = []string{odURL}
 		}
+		source = "opendota"
+		log.Printf("[DOWNLOAD] matchID=%d source=opendota urls=%d", matchID, len(replayURLs))
 	}
 
-	return downloadAndExtractReplay(replayURLs, matchID, replayDir)
+	log.Printf("[DOWNLOAD] matchID=%d downloading from Valve CDN (source=%s, urls=%d)", matchID, source, len(replayURLs))
+	if err := downloadAndExtractReplay(replayURLs, matchID, replayDir); err != nil {
+		log.Printf("[DOWNLOAD] matchID=%d CDN download failed: %v", matchID, err)
+		return source, err
+	}
+	log.Printf("[DOWNLOAD] matchID=%d complete: %s", matchID, demFilePath)
+	return source, nil
 }
 
 // getReplayURLsFromStratz gets cluster/salt from Stratz and constructs all CDN alternative URLs.

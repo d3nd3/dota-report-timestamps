@@ -203,6 +203,11 @@ func (c *Client) Connect() error {
 	}
 
 	log.Printf("Creating new Steam client connection...")
+	if err := steam.InitializeSteamDirectory(); err != nil {
+		log.Printf("Steam: Could not refresh CM server list (%v), using built-in list (may be stale)", err)
+	} else {
+		log.Printf("Steam: Loaded CM server list from Steam directory")
+	}
 	c.steamClient = steam.NewClient()
 	c.dotaClient = dota2.New(c.steamClient, logrus.New())
 
@@ -223,8 +228,12 @@ func (c *Client) Connect() error {
 	// Start connection timeout watchdog
 	go c.connectionTimeoutWatchdog()
 
-	// Start connection (non-blocking)
-	c.steamClient.Connect()
+	// Dial is synchronous in go-steam; run in background so Connect() doesn't hold connectMutex during long/hung dials
+	go func() {
+		if addr := c.steamClient.Connect(); addr != nil {
+			log.Printf("Steam: Connecting to CM %s", addr)
+		}
+	}()
 
 	return nil
 }
@@ -474,16 +483,16 @@ func (c *Client) eventLoop() {
 				}
 
 			case *steam.MachineAuthUpdateEvent:
-				log.Printf("Steam: Machine Auth Update (Hash: %x, Bytes: %d)", e.Hash, len(e.Bytes))
-				if len(e.Bytes) > 0 {
-					if err := ioutil.WriteFile(c.sentryPath, e.Bytes, 0600); err != nil {
-						log.Printf("Steam: Failed to save Sentry File: %v", err)
-					} else {
-						log.Printf("Steam: Sentry File saved successfully to %s", c.sentryPath)
-					}
-				} else {
-					log.Printf("Steam: Warning - MachineAuthUpdateEvent received with empty Bytes!")
-				}
+                log.Printf("Steam: Machine Auth Update (Hash: %x, Bytes: %d)", e.Hash, len(e.Hash))
+                if len(e.Hash) > 0 {
+                    if err := ioutil.WriteFile(c.sentryPath, e.Hash, 0600); err != nil {
+                        log.Printf("Steam: Failed to save Sentry File: %v", err)
+                    } else {
+                        log.Printf("Steam: Sentry File saved successfully to %s", c.sentryPath)
+                    }
+                } else {
+                    log.Printf("Steam: Warning - MachineAuthUpdateEvent received with empty Bytes!")
+                }
 
 			case *events.ClientStateChanged:
 				if e.NewState.ConnectionStatus == protocol.GCConnectionStatus_GCConnectionStatus_HAVE_SESSION {
