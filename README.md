@@ -3,11 +3,11 @@
 **Unlock the psychology behind player reports.** 🧠
 
 ## ⚠️ The Problem
-The report system in Dota 2 is **deeply flawed**. It's often used as a rage button rather than a tool for justice. 😡
+The Dota 2 report system is frequently misused. Rather than functioning as an objective moderation mechanism to penalize genuine griefing, reports are often triggered reflexively out of in-game frustration. 😡
 
-This project was created in an effort to **better understand the psychology behind player's reports**. We want to know *exactly* what triggers a report in the heat of the moment.
+This project was created to **investigate the psychology and real-time triggers behind player reports**. By capturing the exact moments reports occur during gameplay, we can analyze the specific in-game events, mistakes, or interactions that provoke them.
 
-I am very interested to see what other people learn! 🧐 This tool helps you efficiently acquire **hard-evidence** for why the system doesn't really work as intended.
+This tool helps you gather **concrete, empirical evidence** to understand how players actually interact with the report system and identify where current moderation mechanisms fall short. 🧐
 
 ## ✨ Features
 
