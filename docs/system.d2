@@ -1,0 +1,91 @@
+# Dota 2 Report Timestamp Tool — system view
+# Four zones: entry points, core, state, external.
+# Strokes only in the style classes so the SVG works in light and dark themes.
+
+direction: right
+grid-columns: 2
+grid-rows: 2
+
+classes: {
+  entry: {
+    style: { stroke: "#2e6ac7"; stroke-width: 2 }
+  }
+  core: {
+    style: { stroke: "#2ea043"; stroke-width: 2 }
+  }
+  state: {
+    style: { stroke: "#f0b90b"; stroke-width: 2 }
+  }
+  ext: {
+    style: { stroke: "#cf2e2e"; stroke-width: 2 }
+  }
+  store: {
+    style: { stroke: "#f0b90b"; stroke-width: 2 }
+  }
+  thin: {
+    style: { stroke: "#9aa7b2"; stroke-width: 1; stroke-dash: 4 }
+  }
+}
+
+entry: Entry points {
+  direction: down
+
+  run: "run.sh / launch-* · build both binaries, free ports 8081+8082, bot first" { class: entry }
+  server: "cmd/server · HTTP :8081 · static files + /api/*" { class: entry }
+  bot: "cmd/bot · HTTP :8082 · JSON proxy to one Steam GC session" { class: entry }
+  ui: "cmd/server/static · app.js + history.js · browser SPA, no framework" { class: entry }
+  tools: "cmd helpers · hero icon download, Steam/GC probe, scorecard test" { class: entry }
+}
+
+core: Core {
+  direction: down
+  grid-columns: 2
+
+  handlers: "handlers.go · config, browse, replays, parse, history, download, delete, hero icons" { class: core }
+  botclient: "botclient · HTTP client to :8082 · status, replay info, history, scorecard" { class: core }
+  gc: "dota2gc · go-steam login → GC · cluster+salt, history pages, fatal search" { class: core }
+  downloader: "downloader · source ladder + bz2 extract + progress map + retry queue" { class: core }
+  stratz: "stratz · GraphQL match history + replay info" { class: core }
+  parser: "parser · manta stream walk · player and hero joins + report attribution" { class: core }
+  geometry: "isReportButton · scoreboard x band + ten y rows, rescaled by aspect ratio" { class: core }
+  attribution: "hover sessions · 4 s window · 0.7 duration + 0.3 recency · overlap → first hover" { class: core }
+  steamapi: "steamapi · WebAPI match history + replay info" { class: core }
+  cdn: "constructReplayURLs · Valve and Perfect World host patterns" { class: core }
+
+  handlers -> botclient
+  handlers -> parser
+  botclient -> gc
+  gc -> downloader
+  downloader -> stratz
+  downloader -> steamapi
+  downloader -> cdn
+  parser -> geometry
+  parser -> attribution
+
+}
+
+state: State {
+  direction: down
+
+  config: "config.json · XDG config, mode 0600 · replay dir, API keys, Steam creds" { class: store; shape: cylinder }
+  replays: "replay dir · Dota's own replays folder · profile subdir + fatal/date" { class: store; shape: cylinder }
+  cards: "reportcards/<matchId>/ · up to 15 ranked .dem files" { class: store; shape: cylinder }
+  memory: "in-memory maps · progress, pending retries, per-match locks, validate status" { class: store; shape: cylinder }
+}
+
+external: External {
+  direction: down
+
+  steam: "Steam login + Guard · GC session · credentials only to Steam" { class: ext }
+  valve: "Valve replay CDN · replayN.valve.net and valvesoftware.com" { class: ext }
+  perfect: "Perfect World CDN · wmsj.cn and pwrd.com" { class: ext }
+  opendota: "OpenDota · parsed check, parse job, cluster+salt · no replay hosting" { class: ext }
+  stratz_svc: "Stratz GraphQL API" { class: ext }
+  webapi: "Steam WebAPI" { class: ext }
+  browser: "Browser · localhost:8081" { class: ext }
+  releases: "GitHub Releases · linux, windows, mac amd64, mac arm64" { class: ext }
+}
+
+entry -> core
+core -> state
+core -> external

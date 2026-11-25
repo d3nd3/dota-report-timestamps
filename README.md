@@ -2,6 +2,8 @@
 
 **Unlock the psychology behind player reports.** 🧠
 
+Prefer pictures? Start with **[HUMANS.md](HUMANS.md)**.
+
 ## ⚠️ The Problem
 The Dota 2 report system is frequently misused. Rather than functioning as an objective moderation mechanism to penalize genuine griefing, reports are often triggered reflexively out of in-game frustration. 😡
 
